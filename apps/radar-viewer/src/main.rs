@@ -7,4 +7,3 @@ fn main() {
     };
     println!("radar viewer scaffold: {}", volume.summary());
 }
-

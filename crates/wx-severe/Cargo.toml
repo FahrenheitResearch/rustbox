@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-wx-grid = { path = "../wx-grid" }
+anyhow.workspace = true
+sharprs.workspace = true
 wx-thermo = { path = "../wx-thermo" }
+wx-types = { path = "../wx-types" }
 
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

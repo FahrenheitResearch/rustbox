@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+grib-core.workspace = true
 wx-fetch = { path = "../wx-fetch" }
 wx-types = { path = "../wx-types" }
-

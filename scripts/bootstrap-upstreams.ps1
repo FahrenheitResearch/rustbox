@@ -2,34 +2,17 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $upstream = Join-Path $root "upstream"
-
-$repos = @(
-    "metrust-py",
-    "sharprs",
-    "ecape-rs",
-    "cfrust",
-    "ecrust",
-    "rusbie",
-    "rustdar",
-    "wrf-rust",
-    "wrf-rust-plots",
-    "geors",
-    "geocat-rs",
-    "met-cu",
-    "open-mrms"
-)
+$lockPath = Join-Path $root "upstream-lock.json"
+$lock = Get-Content $lockPath -Raw | ConvertFrom-Json
 
 New-Item -ItemType Directory -Force $upstream | Out-Null
-Push-Location $upstream
-try {
-    foreach ($repo in $repos) {
-        if (Test-Path $repo) {
-            Write-Output "skip $repo"
-            continue
-        }
-        git clone "https://github.com/FahrenheitResearch/$repo.git"
+foreach ($repo in $lock.repos) {
+    $repoPath = Join-Path $upstream $repo.name
+    if (-not (Test-Path $repoPath)) {
+        git clone $repo.url $repoPath
     }
-} finally {
-    Pop-Location
+    git -C $repoPath fetch --all --tags --prune
+    git -C $repoPath checkout $repo.commit
+    Write-Output ("checked out {0} @ {1}" -f $repo.name, $repo.commit)
 }
 

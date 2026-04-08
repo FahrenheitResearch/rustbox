@@ -9,4 +9,3 @@ impl RadarVolume {
         format!("{} sweeps from {}", self.sweep_count, self.site)
     }
 }
-

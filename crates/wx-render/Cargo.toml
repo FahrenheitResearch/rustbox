@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-wx-severe = { path = "../wx-severe" }
+anyhow.workspace = true
+image.workspace = true
 wx-types = { path = "../wx-types" }
 
+[dev-dependencies]
+chrono.workspace = true
+tempfile = "3"
+wx-fetch = { path = "../wx-fetch" }
+wx-grib = { path = "../wx-grib" }

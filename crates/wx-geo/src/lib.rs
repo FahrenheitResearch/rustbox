@@ -18,4 +18,3 @@ pub fn haversine_km(a: GeoPoint, b: GeoPoint) -> f64 {
 
     earth_radius_km * arc
 }
-

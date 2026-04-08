@@ -3,12 +3,11 @@ use wx_severe::SevereDiagnostics;
 
 fn main() {
     let overlay = OverlaySpec {
-        palette: "cape".to_string(),
+        palette: "winds".to_string(),
         transparent_background: true,
+        value_range: None,
     };
-    let severe = SevereDiagnostics {
-        significant_tornado_parameter: 0.0,
-    };
+    let severe = SevereDiagnostics::default();
     println!(
         "mesoanalysis app scaffold: palette={} stp={:.1}",
         overlay.palette, severe.significant_tornado_parameter

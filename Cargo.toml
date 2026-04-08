@@ -27,8 +27,12 @@ authors = ["Fahrenheit Research"]
 
 [workspace.dependencies]
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
+grib-core = { git = "https://github.com/FahrenheitResearch/cfrust.git", rev = "d326eca4615df9cb3b081181e5e56a9026bb7c3f", package = "grib-core", default-features = false }
+sharprs = { git = "https://github.com/FahrenheitResearch/sharprs.git", rev = "16cf0757304eb690d0208c304e32a4676178f00a" }

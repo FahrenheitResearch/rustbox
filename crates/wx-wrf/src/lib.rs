@@ -2,4 +2,3 @@
 pub struct WrfAdapterConfig {
     pub domain: String,
 }
-

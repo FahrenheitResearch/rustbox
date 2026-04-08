@@ -6,11 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
 wx-fetch = { path = "../wx-fetch" }
 wx-grib = { path = "../wx-grib" }
 wx-render = { path = "../wx-render" }
 wx-severe = { path = "../wx-severe" }
 wx-thermo = { path = "../wx-thermo" }
 wx-types = { path = "../wx-types" }
-wx-grid = { path = "../wx-grid" }
-

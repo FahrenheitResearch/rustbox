@@ -1,4 +1,4 @@
-use wx_types::FieldGrid;
+use wx_types::Field2D;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerKinematics {
@@ -7,9 +7,8 @@ pub struct LayerKinematics {
     pub bulk_shear_06km_ms: f32,
 }
 
-pub fn summarize_grid(field: &FieldGrid) -> Option<(f32, f32)> {
+pub fn summarize_grid(field: &Field2D) -> Option<(f32, f32)> {
     let min = field.values.iter().copied().reduce(f32::min)?;
     let max = field.values.iter().copied().reduce(f32::max)?;
     Some((min, max))
 }
-
