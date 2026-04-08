@@ -1437,7 +1437,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "serde_json",
  "wx-fetch",
  "wx-grib",
  "wx-render",
@@ -1471,6 +1470,8 @@ dependencies = [
  "chrono",
  "grib-core",
  "wx-fetch",
+ "wx-severe",
+ "wx-thermo",
  "wx-types",
 ]
 

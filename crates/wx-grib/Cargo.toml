@@ -10,3 +10,7 @@ chrono.workspace = true
 grib-core.workspace = true
 wx-fetch = { path = "../wx-fetch" }
 wx-types = { path = "../wx-types" }
+
+[dev-dependencies]
+wx-thermo = { path = "../wx-thermo" }
+wx-severe = { path = "../wx-severe" }

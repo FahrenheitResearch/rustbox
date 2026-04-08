@@ -113,7 +113,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use wx_fetch::{HrrrSubsetRequest, plan_hrrr_subset};
+    use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_subset};
     use wx_grib::decode_selected_message;
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -135,8 +135,10 @@ mod tests {
                 cycle,
                 forecast_hour: 0,
                 product: "sfc".to_string(),
-                variable: "GUST".to_string(),
-                level: "surface".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                }],
             },
             &idx_text,
         )

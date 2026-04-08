@@ -29,6 +29,9 @@ pub fn compute_significant_tornado_parameter(
     parcel: &ParcelDiagnostics,
 ) -> Result<SevereDiagnostics> {
     let sharp_profile = to_sharprs_profile(profile)?;
+    // The pinned sharprs winds.rs path is not yet stable on this fixture set,
+    // so this slice uses the self-contained kinematic helpers adapted from
+    // sharprs/src/python.rs as the current source of truth.
     let ((storm_u, storm_v), _, _) = calc_bunkers(&sharp_profile)?;
     let srh_01km = calc_helicity(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v)?;
     let srh_03km = calc_helicity(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v)?;

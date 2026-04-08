@@ -41,6 +41,8 @@ impl EcapeAdapter for NoEcape {
         _profile: &SoundingProfile,
         _diagnostics: &ParcelDiagnostics,
     ) -> Result<Option<f64>> {
+        // TODO: replace this default adapter with an ecape-rs-backed implementation
+        // for the model-derived HRRR column path once the input mapping is settled.
         Ok(None)
     }
 }
@@ -265,5 +267,19 @@ mod tests {
             (diagnostics.most_unstable.cin_jkg - fixture.expected.mucin_jkg).abs() < 10.0,
             "MUCIN mismatch"
         );
+    }
+
+    #[test]
+    fn default_ecape_adapter_returns_none() {
+        let fixture: SoundingFixture = serde_json::from_str(
+            &std::fs::read_to_string(fixture_path("sounding_supercell.json"))
+                .expect("fixture should be readable"),
+        )
+        .expect("fixture should parse");
+
+        let diagnostics =
+            compute_parcel_diagnostics(&fixture.profile).expect("parcel diagnostics should work");
+
+        assert_eq!(diagnostics.ecape_jkg, None);
     }
 }

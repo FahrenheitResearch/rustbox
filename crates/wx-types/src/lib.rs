@@ -58,6 +58,7 @@ pub struct LevelMetadata {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldMetadata {
+    pub short_name: String,
     pub parameter: String,
     pub units: String,
     pub level: LevelMetadata,

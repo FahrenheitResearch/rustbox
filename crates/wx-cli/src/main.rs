@@ -1,12 +1,17 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use std::path::{Path, PathBuf};
-use wx_fetch::{HrrrSubsetRequest, plan_hrrr_subset};
-use wx_grib::decode_selected_message;
+use std::path::PathBuf;
+use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_subset_with_length};
+use wx_grib::{
+    build_hrrr_sounding_profile, decode_selected_messages, find_valid_hrrr_profile_point,
+};
 use wx_render::{OverlaySpec, render_field_to_png};
 use wx_severe::compute_significant_tornado_parameter;
 use wx_thermo::compute_parcel_diagnostics;
-use wx_types::SoundingProfile;
+
+const DEMO_PRESSURE_LEVELS: [&str; 7] = [
+    "1000 mb", "925 mb", "850 mb", "700 mb", "500 mb", "400 mb", "300 mb",
+];
 
 fn main() -> Result<()> {
     let command = std::env::args()
@@ -25,10 +30,13 @@ fn main() -> Result<()> {
 }
 
 fn print_status() {
-    println!("wx-fetch: real HRRR .idx subset planning from fixture-backed manifests");
-    println!("wx-grib: real GRIB2 decode for one HRRR scalar message");
+    println!("wx-fetch: real HRRR .idx subset planning with multi-message fixture support");
+    println!("wx-grib: real GRIB2 decode for scalar and multi-message HRRR fixtures");
+    println!(
+        "wx-grib: real HRRR column extraction into SoundingProfile at a deterministic grid point"
+    );
     println!("wx-thermo: real sharprs-derived SBCAPE/MLCAPE/MUCAPE/CIN diagnostics");
-    println!("wx-severe: real sharprs-derived STP fixed and kinematic inputs");
+    println!("wx-severe: real fixed-layer STP and kinematics via a local sharprs-derived path");
     println!("wx-render: real transparent PNG overlay writer");
     println!("wx-cuda: stub capability surface only");
     println!("wx-radar/wx-wrf/wx-zarr/wx-py: not implemented in this milestone");
@@ -40,29 +48,34 @@ fn run_demo() -> Result<()> {
         .single()
         .expect("valid fixture cycle");
     let fixture_root = repo_root().join("tests/fixtures");
-    let idx_text = std::fs::read_to_string(fixture_root.join("hrrr_gust_surface_fragment.idx"))?;
-    let plan = plan_hrrr_subset(
-        &HrrrSubsetRequest {
-            cycle,
-            forecast_hour: 0,
-            product: "sfc".to_string(),
-            variable: "GUST".to_string(),
-            level: "surface".to_string(),
-        },
-        &idx_text,
+
+    let surface_fragment = fixture_root.join("hrrr_demo_surface_fragment.grib2");
+    let surface_plan = plan_hrrr_subset_with_length(
+        &surface_request(cycle),
+        &std::fs::read_to_string(fixture_root.join("hrrr_demo_surface_fragment.idx"))?,
+        Some(std::fs::metadata(&surface_fragment)?.len()),
     )?;
-    let field = decode_selected_message(
-        &fixture_root.join("hrrr_gust_surface_fragment.grib2"),
-        &plan,
+    let pressure_fragment = fixture_root.join("hrrr_demo_pressure_fragment.grib2");
+    let pressure_plan = plan_hrrr_subset_with_length(
+        &pressure_request(cycle),
+        &std::fs::read_to_string(fixture_root.join("hrrr_demo_pressure_fragment.idx"))?,
+        Some(std::fs::metadata(&pressure_fragment)?.len()),
     )?;
 
-    let sounding = load_sounding_fixture(&fixture_root.join("sounding_supercell.json"))?;
+    let surface_messages = decode_selected_messages(&surface_fragment, &surface_plan)?;
+    let pressure_messages = decode_selected_messages(&pressure_fragment, &pressure_plan)?;
+    let (x, y) = find_valid_hrrr_profile_point(&surface_messages, &pressure_messages)?;
+    let sounding = build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)?;
     let parcel = compute_parcel_diagnostics(&sounding)?;
     let severe = compute_significant_tornado_parameter(&sounding, &parcel)?;
+    let overlay_field = surface_messages
+        .first()
+        .map(|message| message.field.clone())
+        .context("surface fixture decode did not return the requested gust field")?;
 
     let output_path = repo_root().join("target/demo/hrrr_gust_surface_overlay.png");
     let overlay = render_field_to_png(
-        &field,
+        &overlay_field,
         &OverlaySpec {
             palette: "winds".to_string(),
             transparent_background: true,
@@ -71,8 +84,8 @@ fn run_demo() -> Result<()> {
         &output_path,
     )?;
 
-    let selection = &plan.selections[0];
-    let (field_min, field_max) = field
+    let selection = &surface_plan.selections[0];
+    let (field_min, field_max) = overlay_field
         .finite_min_max()
         .expect("decoded field should have data");
 
@@ -80,15 +93,32 @@ fn run_demo() -> Result<()> {
         "selection_msg={} bytes={}..{}",
         selection.message_number, selection.start, selection.end_exclusive
     );
-    println!("grib_url={}", plan.grib_url);
+    println!("surface_grib_url={}", surface_plan.grib_url);
+    println!("pressure_grib_url={}", pressure_plan.grib_url);
     println!(
         "field={} level={} grid={}x{} range={:.2}..{:.2}",
-        field.metadata.parameter,
-        field.metadata.level.description,
-        field.grid.nx,
-        field.grid.ny,
+        overlay_field.metadata.parameter,
+        overlay_field.metadata.level.description,
+        overlay_field.grid.nx,
+        overlay_field.grid.ny,
         field_min,
         field_max
+    );
+    println!(
+        "profile_point=x{} y{} levels={} sfc_p={:.1} top_p={:.1}",
+        x,
+        y,
+        sounding.levels.len(),
+        sounding
+            .levels
+            .first()
+            .map(|level| level.pressure_hpa)
+            .unwrap_or(0.0),
+        sounding
+            .levels
+            .last()
+            .map(|level| level.pressure_hpa)
+            .unwrap_or(0.0)
     );
     println!(
         "sbcape={:.1} sbcin={:.1} mlcape={:.1} mlcin={:.1} mucape={:.1} mucin={:.1}",
@@ -110,10 +140,77 @@ fn run_demo() -> Result<()> {
     Ok(())
 }
 
-fn load_sounding_fixture(path: &Path) -> Result<SoundingProfile> {
-    let text = std::fs::read_to_string(path)?;
-    let json: serde_json::Value = serde_json::from_str(&text)?;
-    serde_json::from_value(json).map_err(Into::into)
+fn surface_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
+    HrrrSubsetRequest {
+        cycle,
+        forecast_hour: 0,
+        product: "sfc".to_string(),
+        selections: vec![
+            HrrrSelectionRequest {
+                variable: "GUST".to_string(),
+                level: "surface".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "PRES".to_string(),
+                level: "surface".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "HGT".to_string(),
+                level: "surface".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "TMP".to_string(),
+                level: "2 m above ground".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "DPT".to_string(),
+                level: "2 m above ground".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "UGRD".to_string(),
+                level: "10 m above ground".to_string(),
+            },
+            HrrrSelectionRequest {
+                variable: "VGRD".to_string(),
+                level: "10 m above ground".to_string(),
+            },
+        ],
+    }
+}
+
+fn pressure_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
+    HrrrSubsetRequest {
+        cycle,
+        forecast_hour: 0,
+        product: "prs".to_string(),
+        selections: DEMO_PRESSURE_LEVELS
+            .into_iter()
+            .flat_map(|level| {
+                [
+                    HrrrSelectionRequest {
+                        variable: "HGT".to_string(),
+                        level: level.to_string(),
+                    },
+                    HrrrSelectionRequest {
+                        variable: "TMP".to_string(),
+                        level: level.to_string(),
+                    },
+                    HrrrSelectionRequest {
+                        variable: "DPT".to_string(),
+                        level: level.to_string(),
+                    },
+                    HrrrSelectionRequest {
+                        variable: "UGRD".to_string(),
+                        level: level.to_string(),
+                    },
+                    HrrrSelectionRequest {
+                        variable: "VGRD".to_string(),
+                        level: level.to_string(),
+                    },
+                ]
+            })
+            .collect(),
+    }
 }
 
 fn repo_root() -> PathBuf {
