@@ -1,0 +1,7 @@
+/target/
+/.idea/
+/.vscode/
+/upstream/
+__pycache__/
+*.pyc
+

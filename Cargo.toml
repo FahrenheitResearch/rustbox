@@ -1,0 +1,34 @@
+[workspace]
+members = [
+    "crates/wx-types",
+    "crates/wx-geo",
+    "crates/wx-fetch",
+    "crates/wx-grib",
+    "crates/wx-thermo",
+    "crates/wx-grid",
+    "crates/wx-severe",
+    "crates/wx-radar",
+    "crates/wx-render",
+    "crates/wx-zarr",
+    "crates/wx-wrf",
+    "crates/wx-cuda",
+    "crates/wx-py",
+    "crates/wx-cli",
+    "apps/mesoanalysis",
+    "apps/radar-viewer",
+    "apps/open-wx-api-rs",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+authors = ["Fahrenheit Research"]
+
+[workspace.dependencies]
+anyhow = "1"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+

@@ -1,0 +1,9 @@
+[package]
+name = "mesoanalysis-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wx-render = { path = "../../crates/wx-render" }
+wx-severe = { path = "../../crates/wx-severe" }
