@@ -138,6 +138,7 @@ mod tests {
                 selections: vec![HrrrSelectionRequest {
                     variable: "GUST".to_string(),
                     level: "surface".to_string(),
+                    forecast: None,
                 }],
             },
             &idx_text,

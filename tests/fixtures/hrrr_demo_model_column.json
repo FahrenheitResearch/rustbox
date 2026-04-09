@@ -1,0 +1,32 @@
+{
+  "profile": {
+    "station_id": "hrrr_conus_f00_x1798_y1058",
+    "latitude": null,
+    "longitude": null,
+    "grid_x": 1798,
+    "grid_y": 1058,
+    "valid_time": "2024-04-01T00:00:00Z",
+    "levels": [
+      { "pressure_hpa": 1018.4, "height_m": -0.01786041259765625, "temperature_c": 25.484429931640648, "dewpoint_c": 18.349786376953148, "wind_direction_deg": 68.358302284712, "wind_speed_kts": 18.30045602878892 },
+      { "pressure_hpa": 1000.0, "height_m": 158.26004028320313, "temperature_c": 23.674737548828148, "dewpoint_c": 16.287286376953148, "wind_direction_deg": 68.366270616289, "wind_speed_kts": 19.550191917147547 },
+      { "pressure_hpa": 925.0, "height_m": 834.0828247070313, "temperature_c": 17.331781005859398, "dewpoint_c": 14.037286376953148, "wind_direction_deg": 68.88118551015712, "wind_speed_kts": 19.160587429191867 },
+      { "pressure_hpa": 850.0, "height_m": 1553.086669921875, "temperature_c": 14.746209716796898, "dewpoint_c": 6.912286376953148, "wind_direction_deg": 103.56207273959153, "wind_speed_kts": 5.449285808133972 },
+      { "pressure_hpa": 700.0, "height_m": 3179.21728515625, "temperature_c": 8.733636474609398, "dewpoint_c": -33.03122558593748, "wind_direction_deg": 93.7546626075675, "wind_speed_kts": 7.915303637277848 },
+      { "pressure_hpa": 500.0, "height_m": 5867.4326171875, "temperature_c": -9.297033691406227, "dewpoint_c": -31.462713623046852, "wind_direction_deg": 297.70206704531734, "wind_speed_kts": 20.441611411109264 },
+      { "pressure_hpa": 400.0, "height_m": 7546.3759765625, "temperature_c": -22.932501220703102, "dewpoint_c": -43.40021362304685, "wind_direction_deg": 297.05101036567686, "wind_speed_kts": 25.16327563863668 },
+      { "pressure_hpa": 300.0, "height_m": 9587.7373046875, "temperature_c": -37.372152709960915, "dewpoint_c": -74.15021362304685, "wind_direction_deg": 315.48364830541794, "wind_speed_kts": 40.12518680062625 }
+    ]
+  },
+  "expected": {
+    "sbcape_jkg": 209.1262341541376,
+    "sbcin_jkg": -41.776626357514104,
+    "mlcape_jkg": 0.0,
+    "mlcin_jkg": 0.0,
+    "mucape_jkg": 209.1262341541376,
+    "mucin_jkg": -41.776626357514104,
+    "stp_fixed": 0.009656876199962942,
+    "srh_01km_m2s2": 11.356351246492583,
+    "srh_03km_m2s2": 47.366189650846124,
+    "bulk_shear_06km_ms": 18.297925038204
+  }
+}

@@ -6,6 +6,7 @@ use wx_types::{RunMetadata, SourceMetadata};
 pub struct HrrrSelectionRequest {
     pub variable: String,
     pub level: String,
+    pub forecast: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,12 +37,35 @@ pub struct SubsetMessageRef {
     pub forecast: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ByteRangeOrigin {
+    SourceObject,
+    FixtureFragment { fragment_length: u64 },
+}
+
+impl ByteRangeOrigin {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SourceObject => "source_object",
+            Self::FixtureFragment { .. } => "fixture_fragment_rebased",
+        }
+    }
+
+    pub fn known_length(&self) -> Option<u64> {
+        match self {
+            Self::SourceObject => None,
+            Self::FixtureFragment { fragment_length } => Some(*fragment_length),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubsetPlan {
     pub source: SourceMetadata,
     pub run: RunMetadata,
-    pub grib_url: String,
-    pub idx_url: String,
+    pub source_grib_url: String,
+    pub source_idx_url: String,
+    pub byte_range_origin: ByteRangeOrigin,
     pub selections: Vec<SubsetMessageRef>,
 }
 
@@ -90,13 +114,25 @@ pub fn parse_idx(text: &str) -> Result<Vec<IdxEntry>> {
 }
 
 pub fn plan_hrrr_subset(request: &HrrrSubsetRequest, idx_text: &str) -> Result<SubsetPlan> {
-    plan_hrrr_subset_with_length(request, idx_text, None)
+    plan_hrrr_subset_with_context(request, idx_text, ByteRangeOrigin::SourceObject)
 }
 
-pub fn plan_hrrr_subset_with_length(
+pub fn plan_hrrr_fixture_subset(
     request: &HrrrSubsetRequest,
     idx_text: &str,
-    known_grib_length: Option<u64>,
+    fragment_length: u64,
+) -> Result<SubsetPlan> {
+    plan_hrrr_subset_with_context(
+        request,
+        idx_text,
+        ByteRangeOrigin::FixtureFragment { fragment_length },
+    )
+}
+
+fn plan_hrrr_subset_with_context(
+    request: &HrrrSubsetRequest,
+    idx_text: &str,
+    byte_range_origin: ByteRangeOrigin,
 ) -> Result<SubsetPlan> {
     let entries = parse_idx(idx_text)?;
     let mut selections = Vec::new();
@@ -106,30 +142,36 @@ pub fn plan_hrrr_subset_with_length(
     }
 
     for wanted in &request.selections {
-        let (entry_index, entry) = entries
+        let matches: Vec<_> = entries
             .iter()
             .enumerate()
-            .find(|(_, entry)| {
+            .filter(|(_, entry)| {
                 matches_selector(&entry.variable, &wanted.variable)
                     && matches_selector(&entry.level, &wanted.level)
+                    && wanted
+                        .forecast
+                        .as_ref()
+                        .is_none_or(|forecast| matches_selector(&entry.forecast, forecast))
             })
-            .ok_or_else(|| {
-                anyhow!(
-                    "no idx entries matched {}:{}",
-                    wanted.variable,
-                    wanted.level
-                )
-            })?;
+            .collect();
+
+        let (entry_index, entry) = match matches.as_slice() {
+            [] => Err(anyhow!("no idx entries matched {}", selector_label(wanted))),
+            [single] => Ok(*single),
+            _ => Err(anyhow!(
+                "selector {} matched multiple idx entries; specify forecast to disambiguate",
+                selector_label(wanted)
+            )),
+        }?;
 
         let end_exclusive = entries
             .get(entry_index + 1)
             .map(|next| next.byte_offset)
-            .or(known_grib_length)
+            .or_else(|| byte_range_origin.known_length())
             .ok_or_else(|| {
                 anyhow!(
-                    "selected idx entry {}:{} has no following offset and no known GRIB length",
-                    wanted.variable,
-                    wanted.level
+                    "selected idx entry {} has no following offset and no known object length",
+                    selector_label(wanted)
                 )
             })?;
 
@@ -155,11 +197,11 @@ pub fn plan_hrrr_subset_with_length(
 
     let cycle_date = request.cycle.format("%Y%m%d").to_string();
     let cycle_hour = request.cycle.format("%H").to_string();
-    let grib_url = format!(
+    let source_grib_url = format!(
         "https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.{}/conus/hrrr.t{}z.wrf{}f{:02}.grib2",
         cycle_date, cycle_hour, request.product, request.forecast_hour
     );
-    let idx_url = format!("{}.idx", grib_url);
+    let source_idx_url = format!("{}.idx", source_grib_url);
 
     Ok(SubsetPlan {
         source: SourceMetadata {
@@ -171,14 +213,22 @@ pub fn plan_hrrr_subset_with_length(
             cycle: request.cycle,
             forecast_hour: request.forecast_hour,
         },
-        grib_url,
-        idx_url,
+        source_grib_url,
+        source_idx_url,
+        byte_range_origin,
         selections,
     })
 }
 
 fn matches_selector(candidate: &str, wanted: &str) -> bool {
     candidate.trim().eq_ignore_ascii_case(wanted.trim())
+}
+
+fn selector_label(request: &HrrrSelectionRequest) -> String {
+    match request.forecast.as_deref() {
+        Some(forecast) => format!("{}:{}:{}", request.variable, request.level, forecast),
+        None => format!("{}:{}", request.variable, request.level),
+    }
 }
 
 #[cfg(test)]
@@ -210,6 +260,7 @@ mod tests {
                 selections: vec![HrrrSelectionRequest {
                     variable: "GUST".to_string(),
                     level: "surface".to_string(),
+                    forecast: None,
                 }],
             },
             &idx_text,
@@ -219,10 +270,11 @@ mod tests {
         assert_eq!(plan.source.model, "hrrr");
         assert_eq!(plan.source.product, "sfc");
         assert_eq!(
-            plan.grib_url,
+            plan.source_grib_url,
             "https://noaa-hrrr-bdp-pds.s3.amazonaws.com/hrrr.20240401/conus/hrrr.t00z.wrfsfcf00.grib2"
         );
-        assert_eq!(plan.idx_url, format!("{}.idx", plan.grib_url));
+        assert_eq!(plan.source_idx_url, format!("{}.idx", plan.source_grib_url));
+        assert_eq!(plan.byte_range_origin, ByteRangeOrigin::SourceObject);
         assert_eq!(plan.selections.len(), 1);
 
         let selection = &plan.selections[0];
@@ -246,7 +298,7 @@ mod tests {
             .expect("fixture should exist")
             .len();
 
-        let plan = plan_hrrr_subset_with_length(
+        let plan = plan_hrrr_fixture_subset(
             &HrrrSubsetRequest {
                 cycle,
                 forecast_hour: 0,
@@ -255,26 +307,67 @@ mod tests {
                     HrrrSelectionRequest {
                         variable: "GUST".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "TMP".to_string(),
                         level: "2 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "VGRD".to_string(),
                         level: "10 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                 ],
             },
             &idx_text,
-            Some(known_length),
+            known_length,
         )
         .expect("plan should succeed");
 
         assert_eq!(plan.selections.len(), 3);
+        assert_eq!(
+            plan.byte_range_origin,
+            ByteRangeOrigin::FixtureFragment {
+                fragment_length: known_length
+            }
+        );
         assert_eq!(plan.selections[0].variable, "GUST");
         assert_eq!(plan.selections[1].level, "2 m above ground");
         assert_eq!(plan.selections[2].variable, "VGRD");
         assert_eq!(plan.selections[2].end_exclusive, known_length);
+    }
+
+    #[test]
+    fn duplicate_var_level_without_forecast_is_an_error() {
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let idx_text = "\
+1:0:d=2024040100:TMP:surface:anl:\n\
+2:50:d=2024040100:TMP:surface:1 hour fcst:\n\
+3:100:d=2024040100:GUST:surface:anl:\n";
+
+        let error = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "TMP".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            idx_text,
+        )
+        .expect_err("ambiguous selector should fail");
+
+        assert!(
+            error.to_string().contains("matched multiple idx entries"),
+            "unexpected error: {error}"
+        );
     }
 }

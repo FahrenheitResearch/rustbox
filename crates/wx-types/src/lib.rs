@@ -106,6 +106,8 @@ pub struct SoundingProfile {
     pub station_id: String,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    pub grid_x: Option<usize>,
+    pub grid_y: Option<usize>,
     pub valid_time: Option<DateTime<Utc>>,
     pub levels: Vec<SoundingLevel>,
 }

@@ -32,9 +32,9 @@
     "mlcin_jkg": -10.0240,
     "mucape_jkg": 18771.6570,
     "mucin_jkg": 0.0,
-    "stp_fixed": 14.66,
-    "srh_01km_m2s2": 144.1,
-    "srh_03km_m2s2": 319.2,
-    "bulk_shear_06km_ms": 29.33
+    "stp_fixed": 15.77,
+    "srh_01km_m2s2": 151.52,
+    "srh_03km_m2s2": 297.14,
+    "bulk_shear_06km_ms": 30.60
   }
 }

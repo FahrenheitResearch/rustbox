@@ -52,6 +52,10 @@ pub fn find_valid_hrrr_profile_point(
     surface_messages: &[DecodedMessage],
     pressure_messages: &[DecodedMessage],
 ) -> Result<(usize, usize)> {
+    validate_bundle(surface_messages, "surface")?;
+    validate_bundle(pressure_messages, "pressure")?;
+    validate_compatible_bundles(surface_messages, pressure_messages)?;
+
     let reference_field = surface_messages
         .first()
         .or_else(|| pressure_messages.first())
@@ -75,17 +79,26 @@ pub fn build_hrrr_sounding_profile(
     x: usize,
     y: usize,
 ) -> Result<SoundingProfile> {
+    validate_bundle(surface_messages, "surface")?;
+    validate_bundle(pressure_messages, "pressure")?;
+    validate_compatible_bundles(surface_messages, pressure_messages)?;
+
     let levels = column_levels(surface_messages, pressure_messages, x, y)?;
-    let valid_time = surface_messages
+    let reference_message = surface_messages
         .first()
         .or_else(|| pressure_messages.first())
-        .map(|message| message.field.metadata.valid.valid_time);
+        .context("no decoded fields available to build an HRRR sounding profile")?;
 
     Ok(SoundingProfile {
-        station_id: format!("hrrr_x{}_y{}", x, y),
+        station_id: format!(
+            "hrrr_conus_f{:02}_x{}_y{}",
+            reference_message.field.metadata.run.forecast_hour, x, y
+        ),
         latitude: None,
         longitude: None,
-        valid_time,
+        grid_x: Some(x),
+        grid_y: Some(y),
+        valid_time: Some(reference_message.field.metadata.valid.valid_time),
         levels,
     })
 }
@@ -197,6 +210,58 @@ fn decode_message_bytes(
         grid,
         values,
     })
+}
+
+fn validate_bundle(messages: &[DecodedMessage], bundle_name: &str) -> Result<()> {
+    let first = messages
+        .first()
+        .with_context(|| format!("{bundle_name} decoded message bundle was empty"))?;
+
+    for message in &messages[1..] {
+        if message.field.grid != first.field.grid {
+            bail!("{bundle_name} bundle mixes incompatible grid geometry");
+        }
+        if message.field.metadata.run != first.field.metadata.run {
+            bail!("{bundle_name} bundle mixes incompatible run metadata");
+        }
+        if message.field.metadata.valid != first.field.metadata.valid {
+            bail!("{bundle_name} bundle mixes incompatible valid/reference times");
+        }
+        if message.field.metadata.source != first.field.metadata.source {
+            bail!("{bundle_name} bundle mixes incompatible source metadata");
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_compatible_bundles(
+    surface_messages: &[DecodedMessage],
+    pressure_messages: &[DecodedMessage],
+) -> Result<()> {
+    let surface = surface_messages
+        .first()
+        .context("surface decoded message bundle was empty")?;
+    let pressure = pressure_messages
+        .first()
+        .context("pressure decoded message bundle was empty")?;
+
+    if surface.field.grid != pressure.field.grid {
+        bail!("surface and pressure bundles do not share the same HRRR grid geometry");
+    }
+    if surface.field.metadata.run != pressure.field.metadata.run {
+        bail!("surface and pressure bundles do not share the same HRRR run metadata");
+    }
+    if surface.field.metadata.valid != pressure.field.metadata.valid {
+        bail!("surface and pressure bundles do not share the same valid/reference times");
+    }
+    if surface.field.metadata.source.provider != pressure.field.metadata.source.provider
+        || surface.field.metadata.source.model != pressure.field.metadata.source.model
+    {
+        bail!("surface and pressure bundles do not share the same source provenance");
+    }
+
+    Ok(())
 }
 
 fn column_levels(
@@ -447,9 +512,10 @@ fn projection_from_template(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use serde::Deserialize;
     use std::path::PathBuf;
     use wx_fetch::{
-        HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_subset, plan_hrrr_subset_with_length,
+        HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_fixture_subset, plan_hrrr_subset,
     };
     use wx_severe::compute_significant_tornado_parameter;
     use wx_thermo::compute_parcel_diagnostics;
@@ -459,6 +525,26 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/fixtures")
             .join(name)
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ExpectedDiagnostics {
+        sbcape_jkg: f64,
+        sbcin_jkg: f64,
+        mlcape_jkg: f64,
+        mlcin_jkg: f64,
+        mucape_jkg: f64,
+        mucin_jkg: f64,
+        stp_fixed: f64,
+        srh_01km_m2s2: f64,
+        srh_03km_m2s2: f64,
+        bulk_shear_06km_ms: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ModelColumnFixture {
+        profile: SoundingProfile,
+        expected: ExpectedDiagnostics,
     }
 
     #[test]
@@ -477,6 +563,7 @@ mod tests {
                 selections: vec![HrrrSelectionRequest {
                     variable: "GUST".to_string(),
                     level: "surface".to_string(),
+                    forecast: None,
                 }],
             },
             &idx_text,
@@ -516,7 +603,7 @@ mod tests {
         let fragment_len = std::fs::metadata(fixture_path("hrrr_demo_surface_fragment.grib2"))
             .expect("fixture should exist")
             .len();
-        let plan = plan_hrrr_subset_with_length(
+        let plan = plan_hrrr_fixture_subset(
             &HrrrSubsetRequest {
                 cycle,
                 forecast_hour: 0,
@@ -525,19 +612,22 @@ mod tests {
                     HrrrSelectionRequest {
                         variable: "GUST".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "PRES".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "TMP".to_string(),
                         level: "2 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                 ],
             },
             &idx_text,
-            Some(fragment_len),
+            fragment_len,
         )
         .expect("plan should succeed");
 
@@ -557,12 +647,17 @@ mod tests {
 
     #[test]
     fn extracted_hrrr_column_builds_valid_model_profile() {
+        let model_fixture: ModelColumnFixture = serde_json::from_str(
+            &std::fs::read_to_string(fixture_path("hrrr_demo_model_column.json"))
+                .expect("model column fixture should be readable"),
+        )
+        .expect("model column fixture should parse");
         let cycle = Utc
             .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
             .single()
             .expect("valid cycle");
 
-        let surface_plan = plan_hrrr_subset_with_length(
+        let surface_plan = plan_hrrr_fixture_subset(
             &HrrrSubsetRequest {
                 cycle,
                 forecast_hour: 0,
@@ -571,43 +666,48 @@ mod tests {
                     HrrrSelectionRequest {
                         variable: "GUST".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "PRES".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "HGT".to_string(),
                         level: "surface".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "TMP".to_string(),
                         level: "2 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "DPT".to_string(),
                         level: "2 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "UGRD".to_string(),
                         level: "10 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "VGRD".to_string(),
                         level: "10 m above ground".to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                 ],
             },
             &std::fs::read_to_string(fixture_path("hrrr_demo_surface_fragment.idx"))
                 .expect("surface idx should be readable"),
-            Some(
-                std::fs::metadata(fixture_path("hrrr_demo_surface_fragment.grib2"))
-                    .expect("surface fragment should exist")
-                    .len(),
-            ),
+            std::fs::metadata(fixture_path("hrrr_demo_surface_fragment.grib2"))
+                .expect("surface fragment should exist")
+                .len(),
         )
         .expect("surface plan should succeed");
-        let pressure_plan = plan_hrrr_subset_with_length(
+        let pressure_plan = plan_hrrr_fixture_subset(
             &HrrrSubsetRequest {
                 cycle,
                 forecast_hour: 0,
@@ -619,22 +719,27 @@ mod tests {
                             HrrrSelectionRequest {
                                 variable: "HGT".to_string(),
                                 level: level.to_string(),
+                                forecast: Some("anl".to_string()),
                             },
                             HrrrSelectionRequest {
                                 variable: "TMP".to_string(),
                                 level: level.to_string(),
+                                forecast: Some("anl".to_string()),
                             },
                             HrrrSelectionRequest {
                                 variable: "DPT".to_string(),
                                 level: level.to_string(),
+                                forecast: Some("anl".to_string()),
                             },
                             HrrrSelectionRequest {
                                 variable: "UGRD".to_string(),
                                 level: level.to_string(),
+                                forecast: Some("anl".to_string()),
                             },
                             HrrrSelectionRequest {
                                 variable: "VGRD".to_string(),
                                 level: level.to_string(),
+                                forecast: Some("anl".to_string()),
                             },
                         ]
                     })
@@ -642,11 +747,9 @@ mod tests {
             },
             &std::fs::read_to_string(fixture_path("hrrr_demo_pressure_fragment.idx"))
                 .expect("pressure idx should be readable"),
-            Some(
-                std::fs::metadata(fixture_path("hrrr_demo_pressure_fragment.grib2"))
-                    .expect("pressure fragment should exist")
-                    .len(),
-            ),
+            std::fs::metadata(fixture_path("hrrr_demo_pressure_fragment.grib2"))
+                .expect("pressure fragment should exist")
+                .len(),
         )
         .expect("pressure plan should succeed");
 
@@ -663,11 +766,16 @@ mod tests {
 
         let (x, y) = find_valid_hrrr_profile_point(&surface_messages, &pressure_messages)
             .expect("valid point");
+        assert_eq!(x, model_fixture.profile.grid_x.expect("fixture grid_x"));
+        assert_eq!(y, model_fixture.profile.grid_y.expect("fixture grid_y"));
         let profile = build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)
             .expect("profile extraction should succeed");
 
         assert!(profile.levels.len() >= 8);
         assert!(profile.valid_time.is_some());
+        assert_eq!(profile.grid_x, Some(x));
+        assert_eq!(profile.grid_y, Some(y));
+        assert_eq!(profile.station_id, model_fixture.profile.station_id);
         assert!(profile.levels[0].pressure_hpa > profile.levels[1].pressure_hpa);
         assert!(
             profile
@@ -687,14 +795,43 @@ mod tests {
                 .iter()
                 .all(|level| level.temperature_c.is_finite() && level.dewpoint_c.is_finite())
         );
+        assert_eq!(profile.levels.len(), model_fixture.profile.levels.len());
+        for (actual, expected) in profile
+            .levels
+            .iter()
+            .zip(model_fixture.profile.levels.iter())
+        {
+            assert!((actual.pressure_hpa - expected.pressure_hpa).abs() < 0.01);
+            assert!((actual.height_m - expected.height_m).abs() < 0.01);
+            assert!((actual.temperature_c - expected.temperature_c).abs() < 0.01);
+            assert!((actual.dewpoint_c - expected.dewpoint_c).abs() < 0.01);
+            assert!((actual.wind_direction_deg - expected.wind_direction_deg).abs() < 0.01);
+            assert!((actual.wind_speed_kts - expected.wind_speed_kts).abs() < 0.01);
+        }
 
         let parcel = compute_parcel_diagnostics(&profile).expect("parcel diagnostics should work");
-        assert!(parcel.surface.cape_jkg.is_finite());
-        assert!(parcel.surface.cin_jkg.is_finite());
+        assert!((parcel.surface.cape_jkg - model_fixture.expected.sbcape_jkg).abs() < 0.01);
+        assert!((parcel.surface.cin_jkg - model_fixture.expected.sbcin_jkg).abs() < 0.01);
+        assert!((parcel.mixed_layer.cape_jkg - model_fixture.expected.mlcape_jkg).abs() < 0.01);
+        assert!((parcel.mixed_layer.cin_jkg - model_fixture.expected.mlcin_jkg).abs() < 0.01);
+        assert!((parcel.most_unstable.cape_jkg - model_fixture.expected.mucape_jkg).abs() < 0.01);
+        assert!((parcel.most_unstable.cin_jkg - model_fixture.expected.mucin_jkg).abs() < 0.01);
 
         let severe = compute_significant_tornado_parameter(&profile, &parcel)
             .expect("severe diagnostics should work");
-        assert!(severe.significant_tornado_parameter.is_finite());
-        assert!(severe.kinematics.bulk_shear_06km_ms.is_finite());
+        assert!(
+            (severe.significant_tornado_parameter - model_fixture.expected.stp_fixed).abs() < 0.01
+        );
+        assert!(
+            (severe.kinematics.srh_01km_m2s2 - model_fixture.expected.srh_01km_m2s2).abs() < 0.01
+        );
+        assert!(
+            (severe.kinematics.srh_03km_m2s2 - model_fixture.expected.srh_03km_m2s2).abs() < 0.01
+        );
+        assert!(
+            (severe.kinematics.bulk_shear_06km_ms - model_fixture.expected.bulk_shear_06km_ms)
+                .abs()
+                < 0.01
+        );
     }
 }

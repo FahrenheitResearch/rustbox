@@ -77,9 +77,9 @@ pub fn compute_parcel_diagnostics_with_ecape<A: EcapeAdapter>(
     );
 
     let mut diagnostics = ParcelDiagnostics {
-        surface: snapshot_from_parcel(&surface),
-        mixed_layer: snapshot_from_parcel(&mixed_layer),
-        most_unstable: snapshot_from_parcel(&most_unstable),
+        surface: snapshot_from_parcel(&surface)?,
+        mixed_layer: snapshot_from_parcel(&mixed_layer)?,
+        most_unstable: snapshot_from_parcel(&most_unstable)?,
         ecape_jkg: None,
     };
     diagnostics.ecape_jkg = ecape.compute_ecape(profile, &diagnostics)?;
@@ -169,19 +169,25 @@ fn to_cape_profile(profile: &SoundingProfile) -> Result<CapeProfile> {
     ))
 }
 
-fn snapshot_from_parcel(parcel: &ParcelResult) -> ParcelSnapshot {
-    ParcelSnapshot {
-        cape_jkg: finite_or_zero(parcel.bplus),
-        cin_jkg: finite_or_zero(parcel.bminus),
-        lcl_pressure_hpa: finite_or_zero(parcel.lclpres),
-        lcl_height_m_agl: finite_or_zero(parcel.lclhght),
+fn snapshot_from_parcel(parcel: &ParcelResult) -> Result<ParcelSnapshot> {
+    Ok(ParcelSnapshot {
+        cape_jkg: require_finite(parcel.bplus, "CAPE")?,
+        cin_jkg: require_finite(parcel.bminus, "CIN")?,
+        lcl_pressure_hpa: require_finite(parcel.lclpres, "LCL pressure")?,
+        lcl_height_m_agl: require_finite(parcel.lclhght, "LCL height")?,
         lfc_pressure_hpa: finite_option(parcel.lfcpres),
         el_pressure_hpa: finite_option(parcel.elpres),
-    }
+    })
 }
 
-fn finite_or_zero(value: f64) -> f64 {
-    if value.is_finite() { value } else { 0.0 }
+fn require_finite(value: f64, field_name: &str) -> Result<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(anyhow::anyhow!(
+            "sharprs returned a non-finite {field_name} value for the requested parcel"
+        ))
+    }
 }
 
 fn finite_option(value: f64) -> Option<f64> {

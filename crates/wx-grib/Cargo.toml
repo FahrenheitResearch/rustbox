@@ -12,5 +12,7 @@ wx-fetch = { path = "../wx-fetch" }
 wx-types = { path = "../wx-types" }
 
 [dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
 wx-thermo = { path = "../wx-thermo" }
 wx-severe = { path = "../wx-severe" }

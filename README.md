@@ -46,11 +46,11 @@ rustbox/
 
 ## What Is Real Today
 
-- `wx-fetch` can parse fixture-backed HRRR `.idx` manifests and plan single or multi-message subsets.
+- `wx-fetch` can parse fixture-backed HRRR `.idx` manifests, distinguish source-object URLs from rebased fixture-fragment byte ranges, and error on ambiguous var/level selectors.
 - `wx-grib` can decode real GRIB2 fixture fragments, including multi-message surface and pressure-level paths.
-- `wx-grib` can extract one deterministic HRRR model column into `wx-types::SoundingProfile`.
+- `wx-grib` can extract one fixed HRRR model column into `wx-types::SoundingProfile`, with bundle-consistency checks across the decoded fields.
 - `wx-thermo` computes real `sharprs`-derived SBCAPE, MLCAPE, MUCAPE, and CIN.
-- `wx-severe` computes fixed-layer STP plus supporting kinematics from a local `sharprs`-derived implementation.
+- `wx-severe` computes fixed-layer STP plus exact-layer kinematics from a local port of the pinned `sharprs` `winds.rs` logic.
 - `wx-render` writes a real transparent PNG overlay from a decoded scalar field.
 - `cargo run -p wx-cli -- demo` now uses one coherent HRRR-based path from checked-in fixtures.
 
@@ -59,7 +59,8 @@ rustbox/
 - `wx-cuda` remains a capability stub only.
 - `wx-radar`, `wx-wrf`, `wx-zarr`, and `wx-py` are not part of the implemented slice yet.
 - Python compatibility packaging is not implemented.
-- The canonical pinned `sharprs` `winds.rs` path is not yet the source of truth for severe kinematics in this repo; `rustbox` currently uses a documented local adaptation from `sharprs/src/python.rs`.
+- `rustbox` still depends on pinned upstream `grib-core` and `sharprs` crates rather than fully owning those cores locally.
+- The direct pinned `sharprs::winds::helicity` call path still fails on the checked-in fixture profile; `rustbox` keeps a documented exact-layer local port while that upstream issue remains unresolved.
 
 ## Notes
 

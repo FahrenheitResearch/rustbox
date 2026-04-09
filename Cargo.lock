@@ -1469,6 +1469,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "grib-core",
+ "serde",
+ "serde_json",
  "wx-fetch",
  "wx-severe",
  "wx-thermo",

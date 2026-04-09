@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use std::path::PathBuf;
-use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_subset_with_length};
-use wx_grib::{
-    build_hrrr_sounding_profile, decode_selected_messages, find_valid_hrrr_profile_point,
-};
+use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_fixture_subset};
+use wx_grib::{build_hrrr_sounding_profile, decode_selected_messages};
 use wx_render::{OverlaySpec, render_field_to_png};
 use wx_severe::compute_significant_tornado_parameter;
 use wx_thermo::compute_parcel_diagnostics;
@@ -12,6 +10,8 @@ use wx_thermo::compute_parcel_diagnostics;
 const DEMO_PRESSURE_LEVELS: [&str; 7] = [
     "1000 mb", "925 mb", "850 mb", "700 mb", "500 mb", "400 mb", "300 mb",
 ];
+const DEMO_PROFILE_X: usize = 1_798;
+const DEMO_PROFILE_Y: usize = 1_058;
 
 fn main() -> Result<()> {
     let command = std::env::args()
@@ -30,13 +30,19 @@ fn main() -> Result<()> {
 }
 
 fn print_status() {
-    println!("wx-fetch: real HRRR .idx subset planning with multi-message fixture support");
-    println!("wx-grib: real GRIB2 decode for scalar and multi-message HRRR fixtures");
     println!(
-        "wx-grib: real HRRR column extraction into SoundingProfile at a deterministic grid point"
+        "wx-fetch: real HRRR .idx subset planning with explicit source-object vs fixture-fragment byte ranges"
+    );
+    println!(
+        "wx-grib: real GRIB2 decode for scalar and multi-message HRRR fixtures with bundle checks"
+    );
+    println!(
+        "wx-grib: real HRRR column extraction into SoundingProfile at a fixed fixture grid point"
     );
     println!("wx-thermo: real sharprs-derived SBCAPE/MLCAPE/MUCAPE/CIN diagnostics");
-    println!("wx-severe: real fixed-layer STP and kinematics via a local sharprs-derived path");
+    println!(
+        "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs winds.rs port"
+    );
     println!("wx-render: real transparent PNG overlay writer");
     println!("wx-cuda: stub capability surface only");
     println!("wx-radar/wx-wrf/wx-zarr/wx-py: not implemented in this milestone");
@@ -48,23 +54,23 @@ fn run_demo() -> Result<()> {
         .single()
         .expect("valid fixture cycle");
     let fixture_root = repo_root().join("tests/fixtures");
+    let (x, y) = (DEMO_PROFILE_X, DEMO_PROFILE_Y);
 
     let surface_fragment = fixture_root.join("hrrr_demo_surface_fragment.grib2");
-    let surface_plan = plan_hrrr_subset_with_length(
+    let surface_plan = plan_hrrr_fixture_subset(
         &surface_request(cycle),
         &std::fs::read_to_string(fixture_root.join("hrrr_demo_surface_fragment.idx"))?,
-        Some(std::fs::metadata(&surface_fragment)?.len()),
+        std::fs::metadata(&surface_fragment)?.len(),
     )?;
     let pressure_fragment = fixture_root.join("hrrr_demo_pressure_fragment.grib2");
-    let pressure_plan = plan_hrrr_subset_with_length(
+    let pressure_plan = plan_hrrr_fixture_subset(
         &pressure_request(cycle),
         &std::fs::read_to_string(fixture_root.join("hrrr_demo_pressure_fragment.idx"))?,
-        Some(std::fs::metadata(&pressure_fragment)?.len()),
+        std::fs::metadata(&pressure_fragment)?.len(),
     )?;
 
     let surface_messages = decode_selected_messages(&surface_fragment, &surface_plan)?;
     let pressure_messages = decode_selected_messages(&pressure_fragment, &pressure_plan)?;
-    let (x, y) = find_valid_hrrr_profile_point(&surface_messages, &pressure_messages)?;
     let sounding = build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)?;
     let parcel = compute_parcel_diagnostics(&sounding)?;
     let severe = compute_significant_tornado_parameter(&sounding, &parcel)?;
@@ -90,11 +96,14 @@ fn run_demo() -> Result<()> {
         .expect("decoded field should have data");
 
     println!(
-        "selection_msg={} bytes={}..{}",
-        selection.message_number, selection.start, selection.end_exclusive
+        "selection_msg={} fragment_bytes={}..{} source_range_origin={}",
+        selection.message_number,
+        selection.start,
+        selection.end_exclusive,
+        surface_plan.byte_range_origin.label()
     );
-    println!("surface_grib_url={}", surface_plan.grib_url);
-    println!("pressure_grib_url={}", pressure_plan.grib_url);
+    println!("surface_source_grib_url={}", surface_plan.source_grib_url);
+    println!("pressure_source_grib_url={}", pressure_plan.source_grib_url);
     println!(
         "field={} level={} grid={}x{} range={:.2}..{:.2}",
         overlay_field.metadata.parameter,
@@ -149,30 +158,37 @@ fn surface_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
             HrrrSelectionRequest {
                 variable: "GUST".to_string(),
                 level: "surface".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "PRES".to_string(),
                 level: "surface".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "HGT".to_string(),
                 level: "surface".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "TMP".to_string(),
                 level: "2 m above ground".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "DPT".to_string(),
                 level: "2 m above ground".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "UGRD".to_string(),
                 level: "10 m above ground".to_string(),
+                forecast: Some("anl".to_string()),
             },
             HrrrSelectionRequest {
                 variable: "VGRD".to_string(),
                 level: "10 m above ground".to_string(),
+                forecast: Some("anl".to_string()),
             },
         ],
     }
@@ -190,22 +206,27 @@ fn pressure_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
                     HrrrSelectionRequest {
                         variable: "HGT".to_string(),
                         level: level.to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "TMP".to_string(),
                         level: level.to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "DPT".to_string(),
                         level: level.to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "UGRD".to_string(),
                         level: level.to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                     HrrrSelectionRequest {
                         variable: "VGRD".to_string(),
                         level: level.to_string(),
+                        forecast: Some("anl".to_string()),
                     },
                 ]
             })

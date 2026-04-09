@@ -6,8 +6,6 @@ use wx_types::SoundingProfile;
 
 const KTS_TO_MS: f64 = 0.514_444;
 const BUNKERS_DEVIATION_MS: f64 = 7.5;
-type WindVector = (f64, f64);
-type BunkersMotion = (WindVector, WindVector, WindVector);
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct KinematicDiagnostics {
@@ -29,12 +27,12 @@ pub fn compute_significant_tornado_parameter(
     parcel: &ParcelDiagnostics,
 ) -> Result<SevereDiagnostics> {
     let sharp_profile = to_sharprs_profile(profile)?;
-    // The pinned sharprs winds.rs path is not yet stable on this fixture set,
-    // so this slice uses the self-contained kinematic helpers adapted from
-    // sharprs/src/python.rs as the current source of truth.
+    // The pinned sharprs::winds::helicity call path still fails on the checked-in
+    // fixture profiles, so rustbox keeps an exact-layer local port of the winds.rs
+    // algorithms until that upstream behavior is reconciled.
     let ((storm_u, storm_v), _, _) = calc_bunkers(&sharp_profile)?;
-    let srh_01km = calc_helicity(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v)?;
-    let srh_03km = calc_helicity(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v)?;
+    let srh_01km = calc_helicity_exact(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v)?;
+    let srh_03km = calc_helicity_exact(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v)?;
     let bulk_shear_06km_kts = calc_bulk_shear(&sharp_profile, 0.0, 6_000.0)?;
     let bulk_shear_06km_ms = bulk_shear_06km_kts * KTS_TO_MS;
 
@@ -56,49 +54,13 @@ pub fn compute_significant_tornado_parameter(
     })
 }
 
-fn calc_mean_wind_uv(profile: &SharpProfile, bot_agl: f64, top_agl: f64) -> Result<(f64, f64)> {
-    let surface_height = profile.hght[profile.sfc];
-    let bot_height = surface_height + bot_agl;
-    let top_height = surface_height + top_agl;
-
-    let mut sum_u = 0.0;
-    let mut sum_v = 0.0;
-    let mut count = 0.0;
-
-    for index in 0..profile.pres.len() {
-        let height = profile.hght[index];
-        let u = profile.u[index];
-        let v = profile.v[index];
-        if !height.is_finite() || !u.is_finite() || !v.is_finite() {
-            continue;
-        }
-        if height < bot_height || height > top_height {
-            continue;
-        }
-
-        sum_u += u;
-        sum_v += v;
-        count += 1.0;
-    }
-
-    if count == 0.0 {
-        bail!(
-            "profile has no valid wind samples between {:.0} and {:.0} m AGL",
-            bot_agl,
-            top_agl
-        );
-    }
-
-    Ok((sum_u / count, sum_v / count))
-}
+type WindVector = (f64, f64);
+type BunkersMotion = (WindVector, WindVector, WindVector);
 
 fn calc_bunkers(profile: &SharpProfile) -> Result<BunkersMotion> {
-    let (mean_u, mean_v) = calc_mean_wind_uv(profile, 0.0, 6_000.0)?;
-    let (low_u, low_v) = calc_mean_wind_uv(profile, 0.0, 500.0)?;
-    let (upper_u, upper_v) = calc_mean_wind_uv(profile, 5_500.0, 6_000.0)?;
-
-    let shear_u = upper_u - low_u;
-    let shear_v = upper_v - low_v;
+    let p6km = pressure_at_agl(profile, 6_000.0)?;
+    let (mean_u, mean_v) = calc_mean_wind_npw(profile, profile.sfc_pressure(), p6km)?;
+    let (shear_u, shear_v) = calc_wind_shear_vector(profile, profile.sfc_pressure(), p6km)?;
     let shear_mag = shear_u.hypot(shear_v);
     if !shear_mag.is_finite() || shear_mag <= f64::EPSILON {
         bail!("0-6 km shear is too weak to compute Bunkers motion");
@@ -117,98 +79,156 @@ fn calc_bunkers(profile: &SharpProfile) -> Result<BunkersMotion> {
     Ok((right_mover, left_mover, (mean_u, mean_v)))
 }
 
-fn calc_helicity(
+fn calc_mean_wind_npw(profile: &SharpProfile, pbot: f64, ptop: f64) -> Result<(f64, f64)> {
+    let mut sum_u = 0.0;
+    let mut sum_v = 0.0;
+    let mut count = 0u32;
+    let mut pressure = pbot;
+
+    while pressure >= ptop - 0.0001 {
+        if let Ok((u, v)) = wind_at_pressure(profile, pressure) {
+            sum_u += u;
+            sum_v += v;
+            count += 1;
+        }
+        pressure -= 1.0;
+    }
+
+    if count == 0 {
+        bail!(
+            "profile has no valid interpolated wind samples between {:.1} and {:.1} hPa",
+            pbot,
+            ptop
+        );
+    }
+
+    Ok((sum_u / count as f64, sum_v / count as f64))
+}
+
+fn calc_helicity_exact(
     profile: &SharpProfile,
-    bot_agl: f64,
-    top_agl: f64,
+    lower_agl: f64,
+    upper_agl: f64,
     storm_u_kts: f64,
     storm_v_kts: f64,
 ) -> Result<f64> {
-    let surface_height = profile.hght[profile.sfc];
-    let bot_height = surface_height + bot_agl;
-    let top_height = surface_height + top_agl;
+    let lower_pressure = pressure_at_agl(profile, lower_agl)?;
+    let upper_pressure = pressure_at_agl(profile, upper_agl)?;
+    let (lower_u, lower_v) = wind_at_pressure(profile, lower_pressure)?;
+    let (upper_u, upper_v) = wind_at_pressure(profile, upper_pressure)?;
 
-    let mut srh = 0.0;
-    let mut segment_count = 0usize;
+    let mut u_components = vec![lower_u];
+    let mut v_components = vec![lower_v];
 
-    for index in 0..profile.pres.len().saturating_sub(1) {
-        let h0 = profile.hght[index];
-        let h1 = profile.hght[index + 1];
-        let u0 = profile.u[index];
-        let v0 = profile.v[index];
-        let u1 = profile.u[index + 1];
-        let v1 = profile.v[index + 1];
-
-        if !h0.is_finite()
-            || !h1.is_finite()
-            || !u0.is_finite()
-            || !v0.is_finite()
-            || !u1.is_finite()
-            || !v1.is_finite()
-        {
+    for index in 0..profile.pres.len() {
+        let pressure = profile.pres[index];
+        let u = profile.u[index];
+        let v = profile.v[index];
+        if !pressure.is_finite() || !u.is_finite() || !v.is_finite() {
             continue;
         }
-        if h1 < bot_height || h0 > top_height {
-            continue;
+        if pressure < lower_pressure && pressure > upper_pressure {
+            u_components.push(u);
+            v_components.push(v);
         }
-
-        let sru0 = (u0 - storm_u_kts) * KTS_TO_MS;
-        let srv0 = (v0 - storm_v_kts) * KTS_TO_MS;
-        let sru1 = (u1 - storm_u_kts) * KTS_TO_MS;
-        let srv1 = (v1 - storm_v_kts) * KTS_TO_MS;
-
-        srh += sru1 * srv0 - sru0 * srv1;
-        segment_count += 1;
     }
 
-    if segment_count == 0 {
+    u_components.push(upper_u);
+    v_components.push(upper_v);
+
+    if u_components.len() < 2 {
         bail!(
             "profile has no valid wind segments between {:.0} and {:.0} m AGL",
-            bot_agl,
-            top_agl
+            lower_agl,
+            upper_agl
         );
+    }
+
+    let mut srh = 0.0;
+    for index in 0..u_components.len() - 1 {
+        let sru0 = (u_components[index] - storm_u_kts) * KTS_TO_MS;
+        let srv0 = (v_components[index] - storm_v_kts) * KTS_TO_MS;
+        let sru1 = (u_components[index + 1] - storm_u_kts) * KTS_TO_MS;
+        let srv1 = (v_components[index + 1] - storm_v_kts) * KTS_TO_MS;
+        srh += sru1 * srv0 - sru0 * srv1;
     }
 
     Ok(srh)
 }
 
-fn calc_bulk_shear(profile: &SharpProfile, bot_agl: f64, top_agl: f64) -> Result<f64> {
-    let surface_height = profile.hght[profile.sfc];
-    let bot_height = surface_height + bot_agl;
-    let top_height = surface_height + top_agl;
+fn calc_bulk_shear(profile: &SharpProfile, lower_agl: f64, upper_agl: f64) -> Result<f64> {
+    let lower_pressure = pressure_at_agl(profile, lower_agl)?;
+    let upper_pressure = pressure_at_agl(profile, upper_agl)?;
+    let (lower_u, lower_v, upper_u, upper_v) =
+        wind_pair_at_pressures(profile, lower_pressure, upper_pressure)?;
+    Ok((upper_u - lower_u).hypot(upper_v - lower_v))
+}
 
-    let mut bot_index = None;
-    let mut top_index = None;
+fn calc_wind_shear_vector(
+    profile: &SharpProfile,
+    lower_pressure: f64,
+    upper_pressure: f64,
+) -> Result<(f64, f64)> {
+    let (lower_u, lower_v, upper_u, upper_v) =
+        wind_pair_at_pressures(profile, lower_pressure, upper_pressure)?;
+    Ok((upper_u - lower_u, upper_v - lower_v))
+}
 
-    for index in 0..profile.hght.len() {
-        let height = profile.hght[index];
+fn wind_pair_at_pressures(
+    profile: &SharpProfile,
+    lower_pressure: f64,
+    upper_pressure: f64,
+) -> Result<(f64, f64, f64, f64)> {
+    let (lower_u, lower_v) = wind_at_pressure(profile, lower_pressure)?;
+    let (upper_u, upper_v) = wind_at_pressure(profile, upper_pressure)?;
+    Ok((lower_u, lower_v, upper_u, upper_v))
+}
+
+fn pressure_at_agl(profile: &SharpProfile, agl_m: f64) -> Result<f64> {
+    if agl_m.abs() <= f64::EPSILON {
+        return Ok(profile.sfc_pressure());
+    }
+
+    let pressure = profile.pres_at_height(profile.to_msl(agl_m));
+    if pressure.is_finite() {
+        Ok(pressure)
+    } else {
+        bail!(
+            "profile could not interpolate pressure at {:.0} m AGL",
+            agl_m
+        )
+    }
+}
+
+fn wind_at_pressure(profile: &SharpProfile, pressure_hpa: f64) -> Result<(f64, f64)> {
+    let (interp_u, interp_v) = profile.interp_wind(pressure_hpa);
+    if interp_u.is_finite() && interp_v.is_finite() {
+        return Ok((interp_u, interp_v));
+    }
+
+    for index in 0..profile.pres.len() {
+        let pressure = profile.pres[index];
         let u = profile.u[index];
         let v = profile.v[index];
-        if !height.is_finite() || !u.is_finite() || !v.is_finite() {
+        if !pressure.is_finite() || !u.is_finite() || !v.is_finite() {
             continue;
         }
-        if height <= bot_height {
-            bot_index = Some(index);
-        }
-        if height <= top_height {
-            top_index = Some(index);
+        if (pressure - pressure_hpa).abs() <= 0.05 {
+            return Ok((u, v));
         }
     }
 
-    let bot_index =
-        bot_index.ok_or_else(|| anyhow::anyhow!("missing bottom wind for bulk shear layer"))?;
-    let top_index =
-        top_index.ok_or_else(|| anyhow::anyhow!("missing top wind for bulk shear layer"))?;
-
-    let shear_u = profile.u[top_index] - profile.u[bot_index];
-    let shear_v = profile.v[top_index] - profile.v[bot_index];
-    Ok(shear_u.hypot(shear_v))
+    bail!(
+        "profile field `wind` has no valid data near {:.2} hPa",
+        pressure_hpa
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use sharprs::winds;
     use std::path::PathBuf;
     use wx_thermo::{compute_parcel_diagnostics, to_sharprs_profile};
 
@@ -246,10 +266,10 @@ mod tests {
             to_sharprs_profile(&fixture.profile).expect("sharprs profile conversion should work");
         let ((storm_u, storm_v), _, _) =
             calc_bunkers(&sharp_profile).expect("bunkers motion should work");
-        let srh_01km =
-            calc_helicity(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v).expect("srh should work");
-        let srh_03km =
-            calc_helicity(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v).expect("srh should work");
+        let srh_01km = calc_helicity_exact(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v)
+            .expect("srh should work");
+        let srh_03km = calc_helicity_exact(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v)
+            .expect("srh should work");
         let bulk_shear_06km_ms =
             calc_bulk_shear(&sharp_profile, 0.0, 6_000.0).expect("shear should work") * KTS_TO_MS;
         let severe = compute_significant_tornado_parameter(&fixture.profile, &parcel)
@@ -264,5 +284,26 @@ mod tests {
         assert!((bulk_shear_06km_ms - fixture.expected.bulk_shear_06km_ms).abs() < 1.0);
         assert!(severe.kinematics.srh_01km_m2s2 > 100.0);
         assert!(severe.kinematics.bulk_shear_06km_ms > 20.0);
+    }
+
+    #[test]
+    fn pinned_sharprs_helicity_still_fails_on_fixture_profile() {
+        let fixture: SoundingFixture = serde_json::from_str(
+            &std::fs::read_to_string(fixture_path("sounding_supercell.json"))
+                .expect("fixture should be readable"),
+        )
+        .expect("fixture should parse");
+        let sharp_profile =
+            to_sharprs_profile(&fixture.profile).expect("sharprs profile conversion should work");
+        let (storm_u, storm_v, _, _) =
+            winds::non_parcel_bunkers_motion(&sharp_profile).expect("bunkers motion should work");
+
+        let error = winds::helicity(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v, -1.0, true)
+            .expect_err("pinned sharprs helicity path is expected to fail on this fixture");
+
+        assert!(
+            error.to_string().contains("wind"),
+            "unexpected sharprs::winds failure: {error}"
+        );
     }
 }
