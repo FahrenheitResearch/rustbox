@@ -41,7 +41,7 @@ fn print_status() {
     );
     println!("wx-thermo: real sharprs-derived SBCAPE/MLCAPE/MUCAPE/CIN diagnostics");
     println!(
-        "wx-grid: real finite-difference divergence/vorticity/frontogenesis and 5/9-point smoothing"
+        "wx-grid: real constant-spacing divergence/vorticity/theta-frontogenesis and 5/9-point smoothing"
     );
     println!(
         "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs compatibility fork"

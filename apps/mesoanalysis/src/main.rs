@@ -3,7 +3,9 @@ use chrono::{TimeZone, Utc};
 use std::path::PathBuf;
 use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_fixture_subset};
 use wx_grib::decode_selected_messages;
-use wx_grid::{field_stats, frontogenesis_field, smooth_n_point_field, vorticity_field};
+use wx_grid::{
+    field_stats, pressure_level_frontogenesis_field, smooth_n_point_field, vorticity_field,
+};
 use wx_render::{OverlaySpec, render_field_to_png};
 use wx_types::Field2D;
 
@@ -25,9 +27,11 @@ fn main() -> Result<()> {
 
 fn print_status() {
     println!("mesoanalysis: real offline HRRR pressure-level demo");
-    println!("mesoanalysis: decodes 850 mb TMP/UGRD/VGRD from checked-in GRIB2 fixtures");
-    println!("mesoanalysis: computes real wx-grid vorticity, smoothing, and frontogenesis");
-    println!("mesoanalysis: writes a transparent vorticity PNG to target/demo");
+    println!("mesoanalysis: decodes 850 mb HGT/TMP/UGRD/VGRD from checked-in GRIB2 fixtures");
+    println!(
+        "mesoanalysis: computes real wx-grid vorticity, 9-point smoothing, and theta frontogenesis"
+    );
+    println!("mesoanalysis: writes transparent vorticity and frontogenesis PNGs to target/demo");
 }
 
 fn run_demo() -> Result<()> {
@@ -48,25 +52,38 @@ fn run_demo() -> Result<()> {
     )?;
 
     let decoded = decode_selected_messages(&fragment, &plan)?;
+    let height = select_field(&decoded, "HGT", "850 mb")?;
     let temperature = select_field(&decoded, "TMP", "850 mb")?;
     let u_wind = select_field(&decoded, "UGRD", "850 mb")?;
     let v_wind = select_field(&decoded, "VGRD", "850 mb")?;
 
     let vorticity = vorticity_field(u_wind, v_wind)?;
     let smoothed_vorticity = smooth_n_point_field(&vorticity, 9, 1)?;
-    let frontogenesis = frontogenesis_field(temperature, u_wind, v_wind)?;
+    let frontogenesis = pressure_level_frontogenesis_field(temperature, u_wind, v_wind)?;
 
-    let output_path = repo_root().join("target/demo/mesoanalysis_850mb_vorticity.png");
-    let overlay = render_field_to_png(
+    let vorticity_output_path = repo_root().join("target/demo/mesoanalysis_850mb_vorticity.png");
+    let vorticity_overlay = render_field_to_png(
         &smoothed_vorticity,
         &OverlaySpec {
             palette: "vorticity".to_string(),
             transparent_background: true,
             value_range: None,
         },
-        &output_path,
+        &vorticity_output_path,
+    )?;
+    let frontogenesis_output_path =
+        repo_root().join("target/demo/mesoanalysis_850mb_frontogenesis.png");
+    let frontogenesis_overlay = render_field_to_png(
+        &frontogenesis,
+        &OverlaySpec {
+            palette: "frontogenesis".to_string(),
+            transparent_background: true,
+            value_range: None,
+        },
+        &frontogenesis_output_path,
     )?;
 
+    let height_stats = field_stats(height).context("height field contained no finite values")?;
     let vort_stats = field_stats(&vorticity).context("vorticity contained no finite values")?;
     let smooth_stats = field_stats(&smoothed_vorticity)
         .context("smoothed vorticity contained no finite values")?;
@@ -87,14 +104,25 @@ fn run_demo() -> Result<()> {
         smooth_stats.max_value
     );
     println!(
+        "height_range_gpm={:.1}..{:.1}",
+        height_stats.min_value, height_stats.max_value
+    );
+    println!(
         "raw_vorticity_range={:.6}..{:.6} smoothed_mean={:.6}",
         vort_stats.min_value, vort_stats.max_value, smooth_stats.mean_value
     );
     println!(
-        "frontogenesis_range={:.8}..{:.8} mean={:.8}",
+        "theta_frontogenesis_range={:.8}..{:.8} mean={:.8}",
         fronto_stats.min_value, fronto_stats.max_value, fronto_stats.mean_value
     );
-    println!("overlay_png={}", overlay.output_path.display());
+    println!(
+        "vorticity_overlay_png={}",
+        vorticity_overlay.output_path.display()
+    );
+    println!(
+        "frontogenesis_overlay_png={}",
+        frontogenesis_overlay.output_path.display()
+    );
 
     Ok(())
 }
@@ -105,6 +133,11 @@ fn pressure_demo_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
         forecast_hour: 0,
         product: "prs".to_string(),
         selections: vec![
+            HrrrSelectionRequest {
+                variable: "HGT".to_string(),
+                level: "850 mb".to_string(),
+                forecast: Some("anl".to_string()),
+            },
             HrrrSelectionRequest {
                 variable: "TMP".to_string(),
                 level: "850 mb".to_string(),

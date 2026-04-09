@@ -18,6 +18,10 @@ pub struct WindowSpec {
     pub normalize_weights: bool,
 }
 
+const RD_DRY_AIR: f64 = 287.05;
+const CP_DRY_AIR: f64 = 1004.0;
+const KAPPA: f64 = RD_DRY_AIR / CP_DRY_AIR;
+
 pub fn summarize_grid(field: &Field2D) -> Option<(f32, f32)> {
     field_stats(field).map(|summary| (summary.min_value, summary.max_value))
 }
@@ -228,6 +232,14 @@ pub fn frontogenesis(
     out
 }
 
+pub fn potential_temperature(temperature_k: &[f64], pressure_hpa: f64) -> Vec<f64> {
+    let theta_factor = (1000.0 / pressure_hpa).powf(KAPPA);
+    temperature_k
+        .par_iter()
+        .map(|temperature| temperature * theta_factor)
+        .collect()
+}
+
 pub fn smooth_window(
     data: &[f64],
     nx: usize,
@@ -391,7 +403,7 @@ pub fn laplacian_field(field: &Field2D) -> Result<Field2D> {
 }
 
 pub fn divergence_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
-    validate_vector_pair(u_field, v_field)?;
+    validate_wind_component_pair(u_field, v_field)?;
     derived_scalar_field(
         u_field,
         "DIV",
@@ -409,7 +421,7 @@ pub fn divergence_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D>
 }
 
 pub fn vorticity_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
-    validate_vector_pair(u_field, v_field)?;
+    validate_wind_component_pair(u_field, v_field)?;
     derived_scalar_field(
         u_field,
         "VORT",
@@ -459,8 +471,8 @@ pub fn frontogenesis_field(
     u_field: &Field2D,
     v_field: &Field2D,
 ) -> Result<Field2D> {
-    validate_scalar_field(theta_field)?;
-    validate_vector_pair(u_field, v_field)?;
+    validate_theta_field(theta_field)?;
+    validate_wind_component_pair(u_field, v_field)?;
     ensure_compatible_fields(theta_field, u_field, "theta and u-component")?;
     ensure_compatible_fields(theta_field, v_field, "theta and v-component")?;
 
@@ -479,6 +491,32 @@ pub fn frontogenesis_field(
             theta_field.grid.coordinates.dy,
         ),
     )
+}
+
+pub fn potential_temperature_field(temperature_field: &Field2D) -> Result<Field2D> {
+    validate_temperature_field(temperature_field)?;
+    let pressure_hpa = isobaric_level_hpa(temperature_field)?;
+    derived_scalar_field(
+        temperature_field,
+        "THETA",
+        "Potential Temperature",
+        "K",
+        potential_temperature(&field_to_f64(temperature_field), pressure_hpa),
+    )
+}
+
+pub fn pressure_level_frontogenesis_field(
+    temperature_field: &Field2D,
+    u_field: &Field2D,
+    v_field: &Field2D,
+) -> Result<Field2D> {
+    validate_temperature_field(temperature_field)?;
+    validate_wind_component_pair(u_field, v_field)?;
+    ensure_compatible_fields(temperature_field, u_field, "temperature and u-component")?;
+    ensure_compatible_fields(temperature_field, v_field, "temperature and v-component")?;
+
+    let theta_field = potential_temperature_field(temperature_field)?;
+    frontogenesis_field(&theta_field, u_field, v_field)
 }
 
 pub fn smooth_n_point_field(field: &Field2D, n: usize, passes: usize) -> Result<Field2D> {
@@ -522,6 +560,103 @@ fn validate_vector_pair(u_field: &Field2D, v_field: &Field2D) -> Result<()> {
     validate_scalar_field(u_field)?;
     validate_scalar_field(v_field)?;
     ensure_compatible_fields(u_field, v_field, "u and v wind components")
+}
+
+fn validate_wind_component_pair(u_field: &Field2D, v_field: &Field2D) -> Result<()> {
+    validate_vector_pair(u_field, v_field)?;
+    validate_wind_component(u_field, "UGRD", "U-Component of Wind")?;
+    validate_wind_component(v_field, "VGRD", "V-Component of Wind")?;
+    Ok(())
+}
+
+fn validate_wind_component(field: &Field2D, short_name: &str, parameter: &str) -> Result<()> {
+    if field.metadata.short_name != short_name || field.metadata.parameter != parameter {
+        bail!(
+            "field {} / {} is not the expected {} wind component",
+            field.metadata.short_name,
+            field.metadata.parameter,
+            short_name
+        );
+    }
+    if field.metadata.units != "m/s" {
+        bail!(
+            "field {} uses units {}, expected m/s",
+            field.metadata.short_name,
+            field.metadata.units
+        );
+    }
+    Ok(())
+}
+
+fn validate_temperature_field(field: &Field2D) -> Result<()> {
+    validate_scalar_field(field)?;
+    if field.metadata.short_name != "TMP" || field.metadata.parameter != "Temperature" {
+        bail!(
+            "field {} / {} is not a temperature field",
+            field.metadata.short_name,
+            field.metadata.parameter
+        );
+    }
+    if field.metadata.units != "K" {
+        bail!(
+            "temperature field {} uses units {}, expected K",
+            field.metadata.short_name,
+            field.metadata.units
+        );
+    }
+    isobaric_level_hpa(field)?;
+    Ok(())
+}
+
+fn validate_theta_field(field: &Field2D) -> Result<()> {
+    validate_scalar_field(field)?;
+    if field.metadata.short_name != "THETA" || field.metadata.parameter != "Potential Temperature" {
+        bail!(
+            "field {} / {} is not a potential-temperature field",
+            field.metadata.short_name,
+            field.metadata.parameter
+        );
+    }
+    if field.metadata.units != "K" {
+        bail!(
+            "potential-temperature field {} uses units {}, expected K",
+            field.metadata.short_name,
+            field.metadata.units
+        );
+    }
+    isobaric_level_hpa(field)?;
+    Ok(())
+}
+
+fn isobaric_level_hpa(field: &Field2D) -> Result<f64> {
+    if field.metadata.level.code != 100 {
+        bail!(
+            "field {} is on level code {}, expected isobaric level code 100",
+            field.metadata.short_name,
+            field.metadata.level.code
+        );
+    }
+    let pressure_hpa = field.metadata.level.value.ok_or_else(|| {
+        anyhow::anyhow!(
+            "field {} is missing isobaric level value metadata",
+            field.metadata.short_name
+        )
+    })?;
+    if pressure_hpa <= 0.0 {
+        bail!(
+            "field {} has non-positive pressure level {} hPa",
+            field.metadata.short_name,
+            pressure_hpa
+        );
+    }
+    if field.metadata.level.units != "hPa" {
+        bail!(
+            "field {} level units are {}, expected hPa",
+            field.metadata.short_name,
+            field.metadata.level.units
+        );
+    }
+    Ok(pressure_hpa)
 }
 
 fn ensure_compatible_fields(left: &Field2D, right: &Field2D, label: &str) -> Result<()> {
@@ -608,6 +743,11 @@ mod tests {
             forecast_hour: 0,
             product: "prs".to_string(),
             selections: vec![
+                HrrrSelectionRequest {
+                    variable: "HGT".to_string(),
+                    level: "850 mb".to_string(),
+                    forecast: Some("anl".to_string()),
+                },
                 HrrrSelectionRequest {
                     variable: "TMP".to_string(),
                     level: "850 mb".to_string(),
@@ -744,8 +884,117 @@ mod tests {
     }
 
     #[test]
-    fn fixture_backed_vorticity_and_frontogenesis_are_finite() {
+    fn advection_matches_linear_scalar_gradient() {
+        let nx = 5;
+        let ny = 5;
+        let dx = 2.0;
+        let dy = 4.0;
+        let mut scalar = vec![0.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                scalar[idx(j, i, nx)] = 3.0 * i as f64 + 5.0 * j as f64;
+            }
+        }
+        let u = vec![10.0; nx * ny];
+        let v = vec![5.0; nx * ny];
+        let advection = advection(&scalar, &u, &v, nx, ny, dx, dy);
+        for value in advection {
+            approx(value, -(10.0 * 1.5 + 5.0 * 1.25), 1e-10);
+        }
+    }
+
+    #[test]
+    fn five_point_smoother_matches_known_center_weighting() {
+        let nx = 5;
+        let ny = 5;
+        let mut values = vec![0.0; nx * ny];
+        values[idx(2, 2, nx)] = 10.0;
+
+        let smoothed = smooth_n_point(&values, nx, ny, 5, 1);
+        approx(smoothed[idx(2, 2, nx)], 5.0, 1e-10);
+        approx(smoothed[idx(2, 1, nx)], 1.25, 1e-10);
+        approx(smoothed[idx(1, 2, nx)], 1.25, 1e-10);
+    }
+
+    #[test]
+    fn five_point_smoother_propagates_nan_and_preserves_edges() {
+        let nx = 5;
+        let ny = 5;
+        let mut values = vec![4.0; nx * ny];
+        values[idx(2, 2, nx)] = f64::NAN;
+        values[idx(0, 0, nx)] = 11.0;
+
+        let smoothed = smooth_n_point(&values, nx, ny, 5, 1);
+        assert!(smoothed[idx(2, 2, nx)].is_nan());
+        assert!(smoothed[idx(2, 1, nx)].is_nan());
+        approx(smoothed[idx(0, 0, nx)], 11.0, 1e-10);
+    }
+
+    #[test]
+    fn pressure_level_frontogenesis_converts_temperature_to_theta() {
+        let nx = 6;
+        let ny = 6;
+        let dx = 1_000.0;
+        let dy = 1_000.0;
+        let mut temperature = vec![0.0; nx * ny];
+        let mut theta = vec![0.0; nx * ny];
+        let u = vec![8.0; nx * ny];
+        let v = vec![4.0; nx * ny];
+        let pressure_hpa = 850.0_f64;
+        let theta_factor = (1000.0_f64 / pressure_hpa).powf(KAPPA);
+
+        for j in 0..ny {
+            for i in 0..nx {
+                let value = 280.0 + i as f64 + 2.0 * j as f64;
+                temperature[idx(j, i, nx)] = value;
+                theta[idx(j, i, nx)] = value * theta_factor;
+            }
+        }
+
+        let from_temperature = frontogenesis(&temperature, &u, &v, nx, ny, dx, dy);
+        let from_theta = frontogenesis(&theta, &u, &v, nx, ny, dx, dy);
+        for (temperature_value, theta_value) in from_temperature.iter().zip(&from_theta) {
+            approx(*theta_value, *temperature_value * theta_factor, 1e-10);
+        }
+    }
+
+    #[test]
+    fn frontogenesis_field_rejects_raw_temperature_inputs() {
         let fields = decode_pressure_fixture_fields();
+        let temperature = select_field(&fields, "TMP");
+        let u_wind = select_field(&fields, "UGRD");
+        let v_wind = select_field(&fields, "VGRD");
+
+        let error = frontogenesis_field(temperature, u_wind, v_wind)
+            .expect_err("raw temperature should not satisfy theta frontogenesis");
+        assert!(
+            error
+                .to_string()
+                .contains("is not a potential-temperature field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn vorticity_field_rejects_non_wind_inputs() {
+        let fields = decode_pressure_fixture_fields();
+        let temperature = select_field(&fields, "TMP");
+        let v_wind = select_field(&fields, "VGRD");
+
+        let error = vorticity_field(temperature, v_wind)
+            .expect_err("temperature should not be accepted as a wind component");
+        assert!(
+            error
+                .to_string()
+                .contains("is not the expected UGRD wind component"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn fixture_backed_vorticity_and_theta_frontogenesis_are_finite() {
+        let fields = decode_pressure_fixture_fields();
+        let _height = select_field(&fields, "HGT");
         let temperature = select_field(&fields, "TMP");
         let u_wind = select_field(&fields, "UGRD");
         let v_wind = select_field(&fields, "VGRD");
@@ -753,8 +1002,9 @@ mod tests {
         let vorticity = vorticity_field(u_wind, v_wind).expect("vorticity should succeed");
         let smoothed_vorticity =
             smooth_n_point_field(&vorticity, 9, 1).expect("smoothing should succeed");
-        let frontogenesis =
-            frontogenesis_field(temperature, u_wind, v_wind).expect("frontogenesis should succeed");
+        let theta = potential_temperature_field(temperature).expect("theta conversion should work");
+        let frontogenesis = pressure_level_frontogenesis_field(temperature, u_wind, v_wind)
+            .expect("pressure-level frontogenesis should succeed");
 
         assert_eq!(vorticity.grid, u_wind.grid);
         assert_eq!(frontogenesis.grid, temperature.grid);
@@ -770,6 +1020,8 @@ mod tests {
         assert!(smooth_stats.max_value.abs() <= vort_stats.max_value.abs() + 1e-6);
         assert_eq!(vorticity.metadata.short_name, "VORT");
         assert_eq!(smoothed_vorticity.metadata.short_name, "SM9");
+        assert_eq!(theta.metadata.short_name, "THETA");
         assert_eq!(frontogenesis.metadata.short_name, "FGEN");
+        assert_eq!(frontogenesis.metadata.parameter, "Petterssen frontogenesis");
     }
 }

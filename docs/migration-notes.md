@@ -59,9 +59,11 @@ This file tracks the first real vertical slice that replaced the original scaffo
 - Adapted into:
   - [crates/wx-grid/src/lib.rs](../crates/wx-grid/src/lib.rs)
 - What was adapted:
-  - second-order finite-difference gradient, divergence, vorticity, advection, and Petterssen frontogenesis kernels
+  - constant-spacing second-order finite-difference gradient, divergence, vorticity, advection, and Petterssen frontogenesis kernels
   - MetPy-style generic window smoothing plus 5-point and 9-point smoothers
   - `Field2D` wrappers that validate grid/run/level compatibility before deriving new fields
+  - isobaric temperature-to-theta conversion so pressure-level frontogenesis is computed from potential temperature rather than raw temperature
+  - semantic guards for wind-component and theta/temperature field usage in the meteorological wrappers
   - fixture-backed regression tests against the checked-in HRRR 850 mb pressure slice
 - What was intentionally left out:
   - geospatial derivative helpers on full lat/lon grids
@@ -114,6 +116,7 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - [crates/wx-render/src/lib.rs](../crates/wx-render/src/lib.rs)
 - What was adapted:
   - wind palette anchor colors
+  - frontogenesis/vorticity diagnostic palettes
   - simple native raster overlay approach
 - What was intentionally left out:
   - map projection rendering
@@ -136,7 +139,7 @@ This file tracks the first real vertical slice that replaced the original scaffo
 - HRRR mesoanalysis fixture path:
   - reuses [tests/fixtures/hrrr_demo_pressure_fragment.grib2](../tests/fixtures/hrrr_demo_pressure_fragment.grib2)
   - reuses [tests/fixtures/hrrr_demo_pressure_fragment.idx](../tests/fixtures/hrrr_demo_pressure_fragment.idx)
-  - current app demo decodes `TMP`, `UGRD`, and `VGRD` at `850 mb` to derive vorticity and frontogenesis
+  - current app demo decodes `HGT`, `TMP`, `UGRD`, and `VGRD` at `850 mb` to derive vorticity and pressure-level theta frontogenesis
 - Legacy single-field render fixture:
   - [tests/fixtures/hrrr_gust_surface_fragment.grib2](../tests/fixtures/hrrr_gust_surface_fragment.grib2)
   - [tests/fixtures/hrrr_gust_surface_fragment.idx](../tests/fixtures/hrrr_gust_surface_fragment.idx)
