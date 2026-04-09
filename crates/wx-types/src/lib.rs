@@ -191,6 +191,33 @@ pub struct ArchiveJobSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PersistedStoreKind {
+    ZarrV2Directory,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedArrayDescriptor {
+    pub name: String,
+    pub dimensions: Vec<String>,
+    pub shape: Vec<usize>,
+    pub chunks: Vec<usize>,
+    pub dtype: String,
+    pub units: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PersistedStoreDescriptor {
+    pub kind: PersistedStoreKind,
+    pub root_path: String,
+    pub source: SourceMetadata,
+    pub run: RunMetadata,
+    pub valid: ValidTimeMetadata,
+    pub grid: GridSpec,
+    pub arrays: Vec<PersistedArrayDescriptor>,
+    pub compression_level: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArchiveCycleState {
     Planned,
     Downloaded,
@@ -208,6 +235,7 @@ pub struct ArchiveCycleRecord {
     pub subset_path: Option<String>,
     pub staged_manifest_path: Option<String>,
     pub decoded_summary_path: Option<String>,
+    pub persisted_store_path: Option<String>,
     pub state: ArchiveCycleState,
     pub message_count: usize,
     pub field_count_2d: usize,

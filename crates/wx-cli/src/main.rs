@@ -15,6 +15,7 @@ use wx_render::{OverlaySpec, render_field_to_png};
 use wx_severe::compute_significant_tornado_parameter;
 use wx_thermo::compute_parcel_diagnostics;
 use wx_types::{ArchiveCycleState, ArchiveJobSpec, ArchiveRunManifest, RequestedField};
+use wx_zarr::{ZarrWriteConfig, write_field_bundle_to_zarr};
 
 const DEMO_PRESSURE_LEVELS: [&str; 7] = [
     "1000 mb", "925 mb", "850 mb", "700 mb", "500 mb", "400 mb", "300 mb",
@@ -58,9 +59,14 @@ fn print_status() {
         "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs compatibility fork"
     );
     println!("wx-render: real transparent PNG overlay writer");
-    println!("wx-cli archive-core: plan/download/decode/archive-run/resume over HRRR cycle ranges");
+    println!(
+        "wx-zarr: real per-cycle Zarr v2 directory-store persistence for decoded HRRR bundles"
+    );
+    println!(
+        "wx-cli archive-core: plan/download/decode/archive-run/resume over HRRR cycle ranges with persisted stores"
+    );
     println!("wx-cuda: stub capability surface only");
-    println!("wx-radar/wx-wrf/wx-zarr/wx-py: not implemented in this milestone");
+    println!("wx-radar/wx-wrf/wx-py: not implemented in this milestone");
 }
 
 fn run_demo() -> Result<()> {
@@ -268,6 +274,11 @@ fn run_decode(args: &[String]) -> Result<()> {
     let summary = summarize_field_bundle(&bundle);
     let summary_path = staged_manifest_path.with_extension("bundle.json");
     write_json(&summary_path, &summary)?;
+    let zarr_store = write_field_bundle_to_zarr(
+        &bundle,
+        &zarr_output_root_for_decode(&staged_manifest_path)?,
+        &ZarrWriteConfig::default(),
+    )?;
 
     println!(
         "decoded source={} cycle={} f{:02} fields_2d={} fields_3d={} subset_path={}",
@@ -279,6 +290,7 @@ fn run_decode(args: &[String]) -> Result<()> {
         staged.local_grib_path.display()
     );
     println!("bundle_summary={}", summary_path.display());
+    println!("persisted_store={}", zarr_store.root_path);
     Ok(())
 }
 
@@ -292,8 +304,10 @@ fn execute_archive_job(
     std::fs::create_dir_all(output_root)?;
     let staged_dir = output_root.join("staged");
     let decoded_dir = output_root.join("decoded");
+    let zarr_dir = output_root.join("zarr");
     std::fs::create_dir_all(&staged_dir)?;
     std::fs::create_dir_all(&decoded_dir)?;
+    std::fs::create_dir_all(&zarr_dir)?;
 
     let requests = build_hrrr_archive_requests(job)?;
     for request in requests {
@@ -323,7 +337,10 @@ fn execute_archive_job(
             let summary = summarize_field_bundle(&bundle);
             let summary_path = decoded_dir.join(summary_file_name(&staged.source_plan));
             write_json(&summary_path, &summary)?;
+            let zarr_store =
+                write_field_bundle_to_zarr(&bundle, &zarr_dir, &ZarrWriteConfig::default())?;
             record.decoded_summary_path = Some(summary_path.to_string_lossy().to_string());
+            record.persisted_store_path = Some(zarr_store.root_path);
             record.field_count_2d = summary.fields_2d.len();
             record.field_count_3d = summary.fields_3d.len();
             record.state = ArchiveCycleState::Completed;
@@ -374,6 +391,7 @@ fn process_cycle(
     record.staged_manifest_path = Some(staged_manifest_path.to_string_lossy().to_string());
     record.message_count = staged.local_plan.selections.len();
     record.state = ArchiveCycleState::Downloaded;
+    record.persisted_store_path = None;
     record.error = None;
 
     println!(
@@ -392,16 +410,26 @@ fn process_cycle(
         let summary = summarize_field_bundle(&bundle);
         let summary_path = decoded_dir.join(summary_file_name(&plan));
         write_json(&summary_path, &summary)?;
+        let archive_root = decoded_dir
+            .parent()
+            .context("decoded directory must have an archive root parent")?;
+        let zarr_store = write_field_bundle_to_zarr(
+            &bundle,
+            &archive_root.join("zarr"),
+            &ZarrWriteConfig::default(),
+        )?;
         record.decoded_summary_path = Some(summary_path.to_string_lossy().to_string());
+        record.persisted_store_path = Some(zarr_store.root_path.clone());
         record.field_count_2d = summary.fields_2d.len();
         record.field_count_3d = summary.fields_3d.len();
         record.state = ArchiveCycleState::Completed;
         println!(
-            "decoded cycle={} fields_2d={} fields_3d={} bundle_summary={}",
+            "decoded cycle={} fields_2d={} fields_3d={} bundle_summary={} persisted_store={}",
             request.cycle.format("%Y%m%d%H"),
             summary.fields_2d.len(),
             summary.fields_3d.len(),
-            summary_path.display()
+            summary_path.display(),
+            zarr_store.root_path
         );
     }
 
@@ -549,6 +577,14 @@ fn parse_cycle(value: &str) -> Result<DateTime<Utc>> {
     let naive = chrono::NaiveDateTime::parse_from_str(&format!("{value}00"), "%Y%m%d%H%M")
         .with_context(|| format!("invalid cycle {value}; expected YYYYMMDDHH"))?;
     Ok(Utc.from_utc_datetime(&naive))
+}
+
+fn zarr_output_root_for_decode(staged_manifest_path: &Path) -> Result<PathBuf> {
+    let manifest_dir = staged_manifest_path
+        .parent()
+        .context("staged manifest path must live in a directory")?;
+    let archive_root = manifest_dir.parent().unwrap_or(manifest_dir);
+    Ok(archive_root.join("zarr"))
 }
 
 fn print_usage() {

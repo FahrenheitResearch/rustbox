@@ -2382,6 +2382,7 @@ dependencies = [
  "wx-severe",
  "wx-thermo",
  "wx-types",
+ "wx-zarr",
 ]
 
 [[package]]
@@ -2502,6 +2503,11 @@ dependencies = [
 name = "wx-zarr"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "flate2",
+ "serde",
+ "serde_json",
  "wx-types",
 ]
 

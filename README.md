@@ -57,17 +57,18 @@ rustbox/
 - `wx-grid` computes real constant-spacing finite-difference divergence, vorticity, advection, pressure-level theta frontogenesis, and MetPy-style 5/9-point smoothing from `Field2D` inputs.
 - `wx-severe` computes fixed-layer STP plus exact-layer kinematics from a local compatibility fork of the pinned `sharprs` `winds.rs` logic, including a narrow endpoint-wind fallback where the direct upstream helicity path still fails on the checked-in fixture profile.
 - `wx-render` writes a real transparent PNG overlay from a decoded scalar field.
+- `wx-zarr` now writes real per-cycle Zarr v2 directory stores for decoded `FieldBundle` outputs, including 2D/3D arrays, coordinate arrays, root attrs, and archive-store descriptors.
 - `cargo run -p wx-cli -- demo` now uses one coherent HRRR-based path from checked-in fixtures.
-- `cargo run -p wx-cli -- plan ...`, `download ...`, `decode ...`, `archive-run ...`, and `resume ...` now provide a real archive-facing HRRR core for planning, staging, and summarizing remote subset jobs.
+- `cargo run -p wx-cli -- plan ...`, `download ...`, `decode ...`, `archive-run ...`, and `resume ...` now provide a real archive-facing HRRR core for planning, staging, decoding, and persisting remote subset jobs.
 - `cargo run -p mesoanalysis-app -- demo` now decodes the checked-in HRRR 850 mb pressure fixture, computes vorticity plus theta-based frontogenesis on that pressure surface, and writes real PNG overlays for both.
 
 ## What Is Still Stubbed
 
 - `wx-cuda` remains a capability stub only.
-- `wx-radar`, `wx-wrf`, `wx-zarr`, and `wx-py` are not part of the implemented science surface yet.
+- `wx-radar`, `wx-wrf`, and `wx-py` are not part of the implemented science surface yet.
 - `radar-viewer` and `open-wx-api-rs` are still scaffold apps.
 - Python compatibility packaging is not implemented.
-- Persistent multi-run output is still missing because `wx-zarr` remains stubbed; the archive core currently stages GRIB subset files plus JSON manifests and bundle summaries rather than durable array stores.
+- The archive core now persists per-cycle Zarr stores, but multi-cycle append/partition semantics and downstream product-store conventions are still early.
 - `rustbox` still depends on pinned upstream `grib-core` and `sharprs` crates rather than fully owning those cores locally.
 - The direct pinned `sharprs::winds::helicity` call path still fails on the checked-in fixture profile; `rustbox` keeps a documented exact-layer local port while that upstream issue remains unresolved.
 - `wx-grid` is still a constant-spacing finite-difference core. Projection-aware and map-factor-aware meteorological derivatives are future work.

@@ -346,6 +346,7 @@ pub fn initial_archive_manifest(job: &ArchiveJobSpec) -> Result<wx_types::Archiv
             subset_path: None,
             staged_manifest_path: None,
             decoded_summary_path: None,
+            persisted_store_path: None,
             state: ArchiveCycleState::Planned,
             message_count: 0,
             field_count_2d: 0,

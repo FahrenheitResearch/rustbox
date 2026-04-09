@@ -35,6 +35,12 @@
       "url": "https://github.com/FahrenheitResearch/metrust-py.git",
       "commit": "1b8436779832be326f24bd2acd40a908e9f54685",
       "purpose": "Grid kinematics, smoothing, and mesoanalysis reference"
+    },
+    {
+      "name": "open-mrms",
+      "url": "https://github.com/FahrenheitResearch/open-mrms.git",
+      "commit": "3d08c318e38b09f50734eea3434c08993dbaf499",
+      "purpose": "Zarr writer, partitioned store layout, and ingest-to-store reference"
     }
   ]
 }
