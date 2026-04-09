@@ -4,7 +4,7 @@
       "name": "rusbie",
       "url": "https://github.com/FahrenheitResearch/rusbie.git",
       "commit": "bd13520b906993d58b1b29d27aaa8aae877a9338",
-      "purpose": "HRRR subset planning and .idx parsing reference"
+      "purpose": "HRRR subset planning, source probing, cache layout, and range-download reference"
     },
     {
       "name": "cfrust",

@@ -3,11 +3,14 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use grib_core::grib2::{
     Grib2File, level_name, parameter_name, parameter_units, unpack_message_normalized,
 };
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::path::Path;
-use wx_fetch::{SubsetMessageRef, SubsetPlan};
+use wx_fetch::{StagedSubset, SubsetMessageRef, SubsetPlan};
 use wx_types::{
-    CoordinateMetadata, Field2D, FieldMetadata, GridSpec, LevelMetadata, ProjectionKind,
-    RunMetadata, SoundingLevel, SoundingProfile, ValidTimeMetadata,
+    CoordinateMetadata, Field2D, Field2DSummary, Field3D, Field3DSummary, FieldBundle,
+    FieldBundleSummary, FieldMetadata, GridSpec, LevelAxis, LevelMetadata, NativeVolume,
+    ProjectionKind, RunMetadata, SoundingLevel, SoundingProfile, TimeAxis, ValidTimeMetadata,
 };
 
 const MS_TO_KTS: f64 = 1.943_844_492_440_604_6;
@@ -46,6 +49,109 @@ pub fn decode_selected_messages(
     }
 
     Ok(decoded)
+}
+
+pub fn decode_staged_subset(staged_subset: &StagedSubset) -> Result<Vec<DecodedMessage>> {
+    decode_selected_messages(&staged_subset.local_grib_path, &staged_subset.local_plan)
+}
+
+pub fn decode_field_bundle(fragment_path: &Path, plan: &SubsetPlan) -> Result<FieldBundle> {
+    let decoded = decode_selected_messages(fragment_path, plan)?;
+    build_field_bundle(&decoded)
+}
+
+pub fn decode_native_volume(
+    fragment_path: &Path,
+    plan: &SubsetPlan,
+    product: &str,
+) -> Result<NativeVolume> {
+    let bundle = decode_field_bundle(fragment_path, plan)?;
+    Ok(NativeVolume {
+        product: product.to_string(),
+        time_axis: TimeAxis {
+            cycles: vec![bundle.run.cycle],
+            valid_times: vec![bundle.valid.valid_time],
+            forecast_hours: vec![bundle.run.forecast_hour],
+        },
+        bundle,
+    })
+}
+
+pub fn build_field_bundle(messages: &[DecodedMessage]) -> Result<FieldBundle> {
+    validate_bundle(messages, "decoded")?;
+
+    let first = messages
+        .first()
+        .context("decoded message bundle was empty")?;
+    let fields_2d: Vec<Field2D> = messages
+        .iter()
+        .map(|message| message.field.clone())
+        .collect();
+    let fields_3d = build_stacked_fields(messages)?;
+
+    Ok(FieldBundle {
+        source: first.field.metadata.source.clone(),
+        run: first.field.metadata.run.clone(),
+        valid: first.field.metadata.valid.clone(),
+        grid: first.field.grid.clone(),
+        fields_2d,
+        fields_3d,
+    })
+}
+
+pub fn summarize_field_bundle(bundle: &FieldBundle) -> FieldBundleSummary {
+    FieldBundleSummary {
+        source: bundle.source.clone(),
+        run: bundle.run.clone(),
+        valid: bundle.valid.clone(),
+        grid: bundle.grid.clone(),
+        fields_2d: bundle
+            .fields_2d
+            .iter()
+            .map(|field| {
+                let (finite_min, finite_max) = match field.finite_min_max() {
+                    Some((min_value, max_value)) => (Some(min_value), Some(max_value)),
+                    None => (None, None),
+                };
+                Field2DSummary {
+                    short_name: field.metadata.short_name.clone(),
+                    parameter: field.metadata.parameter.clone(),
+                    level: field.metadata.level.description.clone(),
+                    units: field.metadata.units.clone(),
+                    nx: field.grid.nx,
+                    ny: field.grid.ny,
+                    finite_min,
+                    finite_max,
+                }
+            })
+            .collect(),
+        fields_3d: bundle
+            .fields_3d
+            .iter()
+            .map(|field| {
+                let (finite_min, finite_max) = match field.finite_min_max() {
+                    Some((min_value, max_value)) => (Some(min_value), Some(max_value)),
+                    None => (None, None),
+                };
+                Field3DSummary {
+                    short_name: field.metadata.short_name.clone(),
+                    parameter: field.metadata.parameter.clone(),
+                    units: field.metadata.units.clone(),
+                    level_count: field.level_axis.levels.len(),
+                    levels: field
+                        .level_axis
+                        .levels
+                        .iter()
+                        .map(|level| level.description.clone())
+                        .collect(),
+                    nx: field.grid.nx,
+                    ny: field.grid.ny,
+                    finite_min,
+                    finite_max,
+                }
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +393,85 @@ fn validate_compatible_bundles(
     }
 
     Ok(())
+}
+
+fn build_stacked_fields(messages: &[DecodedMessage]) -> Result<Vec<Field3D>> {
+    let mut groups: BTreeMap<(String, String, String, u8, String), Vec<Field2D>> = BTreeMap::new();
+    for message in messages {
+        let key = (
+            message.field.metadata.short_name.clone(),
+            message.field.metadata.parameter.clone(),
+            message.field.metadata.units.clone(),
+            message.field.metadata.level.code,
+            message.field.metadata.level.units.clone(),
+        );
+        groups.entry(key).or_default().push(message.field.clone());
+    }
+
+    let mut stacked = Vec::new();
+    for ((_short_name, _parameter, _units, _level_code, _level_units), mut fields) in groups {
+        let distinct_levels = fields
+            .iter()
+            .filter_map(|field| field.metadata.level.value)
+            .collect::<Vec<_>>();
+        if fields.len() < 2 || distinct_levels.len() < 2 {
+            continue;
+        }
+
+        fields.sort_by(|left, right| {
+            compare_level_metadata(&left.metadata.level, &right.metadata.level)
+        });
+        let first = fields
+            .first()
+            .context("stacked field grouping unexpectedly empty")?;
+        let mut values = Vec::with_capacity(fields.len() * first.expected_len());
+        let levels: Vec<LevelMetadata> = fields
+            .iter()
+            .map(|field| field.metadata.level.clone())
+            .collect();
+        for field in &fields {
+            values.extend(field.values.iter().copied());
+        }
+
+        stacked.push(Field3D {
+            metadata: FieldMetadata {
+                short_name: first.metadata.short_name.clone(),
+                parameter: first.metadata.parameter.clone(),
+                units: first.metadata.units.clone(),
+                level: LevelMetadata {
+                    code: first.metadata.level.code,
+                    description: format!("stacked {}", first.metadata.level.units),
+                    value: None,
+                    units: first.metadata.level.units.clone(),
+                },
+                source: first.metadata.source.clone(),
+                run: first.metadata.run.clone(),
+                valid: first.metadata.valid.clone(),
+            },
+            grid: first.grid.clone(),
+            level_axis: LevelAxis {
+                kind: LevelMetadata {
+                    code: first.metadata.level.code,
+                    description: "level_axis".to_string(),
+                    value: None,
+                    units: first.metadata.level.units.clone(),
+                },
+                levels,
+            },
+            values,
+        });
+    }
+
+    Ok(stacked)
+}
+
+fn compare_level_metadata(left: &LevelMetadata, right: &LevelMetadata) -> Ordering {
+    match (left.value, right.value) {
+        (Some(left_value), Some(right_value)) => right_value
+            .partial_cmp(&left_value)
+            .unwrap_or(Ordering::Equal),
+        _ => left.description.cmp(&right.description),
+    }
 }
 
 fn column_levels(
@@ -794,6 +979,117 @@ mod tests {
         assert_eq!(
             decoded[2].field.values.len(),
             decoded[2].field.expected_len()
+        );
+    }
+
+    #[test]
+    fn decoded_pressure_bundle_builds_stacked_3d_fields() {
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let pressure_plan = plan_hrrr_fixture_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "prs".to_string(),
+                selections: REQUIRED_PRESSURE_LEVELS
+                    .into_iter()
+                    .flat_map(|level| {
+                        [
+                            HrrrSelectionRequest {
+                                variable: "HGT".to_string(),
+                                level: level.to_string(),
+                                forecast: Some("anl".to_string()),
+                            },
+                            HrrrSelectionRequest {
+                                variable: "TMP".to_string(),
+                                level: level.to_string(),
+                                forecast: Some("anl".to_string()),
+                            },
+                            HrrrSelectionRequest {
+                                variable: "UGRD".to_string(),
+                                level: level.to_string(),
+                                forecast: Some("anl".to_string()),
+                            },
+                        ]
+                    })
+                    .collect(),
+            },
+            &std::fs::read_to_string(fixture_path("hrrr_demo_pressure_fragment.idx"))
+                .expect("pressure idx should be readable"),
+            std::fs::metadata(fixture_path("hrrr_demo_pressure_fragment.grib2"))
+                .expect("pressure fragment should exist")
+                .len(),
+        )
+        .expect("pressure plan should succeed");
+
+        let bundle = decode_field_bundle(
+            &fixture_path("hrrr_demo_pressure_fragment.grib2"),
+            &pressure_plan,
+        )
+        .expect("bundle decode should succeed");
+
+        assert_eq!(bundle.fields_2d.len(), pressure_plan.selections.len());
+        let tmp_stack = bundle
+            .fields_3d
+            .iter()
+            .find(|field| field.metadata.short_name == "TMP")
+            .expect("TMP stack should exist");
+        assert_eq!(
+            tmp_stack.level_axis.levels.len(),
+            REQUIRED_PRESSURE_LEVELS.len()
+        );
+        assert_eq!(tmp_stack.expected_len(), tmp_stack.values.len());
+    }
+
+    #[test]
+    fn decoded_bundle_summary_reports_3d_stacks() {
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let pressure_plan = plan_hrrr_fixture_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "prs".to_string(),
+                selections: vec![
+                    HrrrSelectionRequest {
+                        variable: "TMP".to_string(),
+                        level: "850 mb".to_string(),
+                        forecast: Some("anl".to_string()),
+                    },
+                    HrrrSelectionRequest {
+                        variable: "TMP".to_string(),
+                        level: "700 mb".to_string(),
+                        forecast: Some("anl".to_string()),
+                    },
+                ],
+            },
+            &std::fs::read_to_string(fixture_path("hrrr_demo_pressure_fragment.idx"))
+                .expect("pressure idx should be readable"),
+            std::fs::metadata(fixture_path("hrrr_demo_pressure_fragment.grib2"))
+                .expect("pressure fragment should exist")
+                .len(),
+        )
+        .expect("pressure plan should succeed");
+
+        let bundle = decode_field_bundle(
+            &fixture_path("hrrr_demo_pressure_fragment.grib2"),
+            &pressure_plan,
+        )
+        .expect("bundle decode should succeed");
+        let summary = summarize_field_bundle(&bundle);
+
+        assert_eq!(summary.fields_2d.len(), 2);
+        assert_eq!(summary.fields_3d.len(), 1);
+        assert_eq!(summary.fields_3d[0].level_count, 2);
+        assert!(
+            summary.fields_3d[0]
+                .levels
+                .iter()
+                .any(|level| level == "850 mb")
         );
     }
 
