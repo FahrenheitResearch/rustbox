@@ -7,8 +7,12 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wx-fetch = { path = "../../crates/wx-fetch" }
 wx-grib = { path = "../../crates/wx-grib" }
 wx-grid = { path = "../../crates/wx-grid" }
 wx-render = { path = "../../crates/wx-render" }
 wx-types = { path = "../../crates/wx-types" }
+wx-zarr = { path = "../../crates/wx-zarr" }

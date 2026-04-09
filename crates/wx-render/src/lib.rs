@@ -15,6 +15,14 @@ const FRONTOGENESIS_PALETTE: &[&str] = &[
     "#183a63", "#2e5f92", "#5f90bf", "#a9c9e6", "#f7f7f7", "#f0c7b8", "#da8f78", "#c45c48",
     "#9e2f2f", "#6f0f1f",
 ];
+const DIVERGENCE_PALETTE: &[&str] = &[
+    "#113d6b", "#2d6ea0", "#6aa4c8", "#d7ebf5", "#f7f7f7", "#f3d4c7", "#d98b6f", "#b54837",
+    "#7d1822",
+];
+const ADVECTION_PALETTE: &[&str] = &[
+    "#0b3c5d", "#328cc1", "#74b3ce", "#d9ecf2", "#f7f7f7", "#f3d9ca", "#e39b7b", "#c75d43",
+    "#8f2d1f",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlaySpec {
@@ -102,6 +110,14 @@ fn palette_by_name(name: &str) -> Result<Vec<Rgba<u8>>> {
             .map(|hex| rgba_from_hex(hex))
             .collect()),
         "frontogenesis" => Ok(FRONTOGENESIS_PALETTE
+            .iter()
+            .map(|hex| rgba_from_hex(hex))
+            .collect()),
+        "divergence" => Ok(DIVERGENCE_PALETTE
+            .iter()
+            .map(|hex| rgba_from_hex(hex))
+            .collect()),
+        "advection" => Ok(ADVECTION_PALETTE
             .iter()
             .map(|hex| rgba_from_hex(hex))
             .collect()),

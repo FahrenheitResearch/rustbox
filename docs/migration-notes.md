@@ -164,10 +164,31 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - chunked compressed float chunk writing
   - per-store root attrs plus coordinate-array and field-array conventions
   - per-cycle archive-store path generation for decoded bundle outputs
+  - local bundle reader that reconstructs `FieldBundle` values from persisted store metadata and chunks
 - What was intentionally left out:
   - multi-cycle append into a single logical time axis
   - richer CF/grid-mapping conventions for projected model grids
   - remote/object-store backends
+
+## mesoanalysis app
+
+- Upstream repo: `metrust-py`
+- Commit: `1b8436779832be326f24bd2acd40a908e9f54685`
+- Source files:
+  - `upstream/metrust-py/docs/methodology/architecture.md`
+  - `upstream/metrust-py/docs/methodology/grid-kinematics.md`
+  - `upstream/metrust-py/crates/metrust/src/calc/kinematics.rs`
+- Adapted into:
+  - [apps/mesoanalysis/src/main.rs](../apps/mesoanalysis/src/main.rs)
+- What was adapted:
+  - batch-oriented product registry shape over a local archive/persisted-store core
+  - per-cycle product dependency mapping for 850 mb wind/temperature diagnostics
+  - archive-manifest input -> persisted-store read -> derived-store write -> PNG export flow
+  - local run/resume manifest for mesoanalysis product batches
+- What was intentionally left out:
+  - the full upstream hrrr-mesoanalysis 46-parameter orchestration
+  - obs/QC/Barnes assimilation
+  - projection-aware render products beyond the current PNG overlays
 
 ## Fixtures
 
@@ -189,7 +210,11 @@ This file tracks the first real vertical slice that replaced the original scaffo
 - HRRR mesoanalysis fixture path:
   - reuses [tests/fixtures/hrrr_demo_pressure_fragment.grib2](../tests/fixtures/hrrr_demo_pressure_fragment.grib2)
   - reuses [tests/fixtures/hrrr_demo_pressure_fragment.idx](../tests/fixtures/hrrr_demo_pressure_fragment.idx)
-  - current app demo decodes `HGT`, `TMP`, `UGRD`, and `VGRD` at `850 mb` to derive vorticity and pressure-level theta frontogenesis
+  - current app demo decodes `HGT`, `TMP`, `UGRD`, and `VGRD` at `850 mb` to derive smoothed vorticity, divergence, temperature advection, and pressure-level theta frontogenesis
+- Archive-backed mesoanalysis smoke-test path:
+  - `cargo run -p wx-cli -- archive-run 2024040100 2024040100 prs 0 target/meso-batch-smoke "HGT|850 mb|anl" "TMP|850 mb|anl" "UGRD|850 mb|anl" "VGRD|850 mb|anl"`
+  - `cargo run -p mesoanalysis-app -- run target/meso-batch-smoke/archive_manifest.json target/meso-products-smoke all`
+  - stages a real remote HRRR subset, persists the base per-cycle store, then writes a derived per-cycle mesoanalysis Zarr store plus PNG outputs
 - Legacy single-field render fixture:
   - [tests/fixtures/hrrr_gust_surface_fragment.grib2](../tests/fixtures/hrrr_gust_surface_fragment.grib2)
   - [tests/fixtures/hrrr_gust_surface_fragment.idx](../tests/fixtures/hrrr_gust_surface_fragment.idx)

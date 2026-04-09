@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use flate2::Compression;
+use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use wx_types::{
-    Field2D, Field3D, FieldBundle, PersistedArrayDescriptor, PersistedStoreDescriptor,
-    PersistedStoreKind, ProjectionKind,
+    Field2D, Field3D, FieldBundle, FieldMetadata, GridSpec, LevelAxis, LevelMetadata,
+    PersistedArrayDescriptor, PersistedStoreDescriptor, PersistedStoreKind, ProjectionKind,
+    RunMetadata, SourceMetadata, ValidTimeMetadata,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +52,44 @@ struct ZarrCompressor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ZarrGroup {
     zarr_format: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ZarrRootAttrs {
+    source: SourceMetadata,
+    run: ZarrRunAttrs,
+    valid: ZarrValidAttrs,
+    grid: GridSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ZarrRunAttrs {
+    cycle: DateTime<Utc>,
+    forecast_hour: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ZarrValidAttrs {
+    reference_time: DateTime<Utc>,
+    valid_time: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ZarrField2DAttrs {
+    short_name: String,
+    parameter: String,
+    units: String,
+    level: LevelMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ZarrField3DAttrs {
+    short_name: String,
+    parameter: String,
+    units: String,
+    #[serde(default)]
+    level: Option<LevelMetadata>,
+    level_axis: LevelAxis,
 }
 
 struct ZarrStore {
@@ -212,6 +253,133 @@ pub fn write_field_bundle_to_zarr(
         arrays,
         compression_level: config.compression_level,
     })
+}
+
+pub fn read_field_bundle_from_zarr(store_path: &Path) -> Result<FieldBundle> {
+    let root_attrs: ZarrRootAttrs = read_json_file(&store_path.join(".zattrs"))
+        .with_context(|| format!("failed to read root attrs from {}", store_path.display()))?;
+    let source = root_attrs.source;
+    let run = RunMetadata {
+        cycle: root_attrs.run.cycle,
+        forecast_hour: root_attrs.run.forecast_hour,
+    };
+    let valid = ValidTimeMetadata {
+        reference_time: root_attrs.valid.reference_time,
+        valid_time: root_attrs.valid.valid_time,
+    };
+    let grid = root_attrs.grid;
+
+    Ok(FieldBundle {
+        source: source.clone(),
+        run: run.clone(),
+        valid: valid.clone(),
+        grid: grid.clone(),
+        fields_2d: read_field2d_arrays(store_path, &source, &run, &valid, &grid)?,
+        fields_3d: read_field3d_arrays(store_path, &source, &run, &valid, &grid)?,
+    })
+}
+
+fn read_field2d_arrays(
+    store_path: &Path,
+    source: &SourceMetadata,
+    run: &RunMetadata,
+    valid: &ValidTimeMetadata,
+    grid: &GridSpec,
+) -> Result<Vec<Field2D>> {
+    let fields_dir = store_path.join("fields_2d");
+    if !fields_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(&fields_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    entries
+        .into_iter()
+        .map(|entry| {
+            let array_dir = entry.path();
+            let zarray: ZarrArray = read_json_file(&array_dir.join(".zarray"))?;
+            let attrs: ZarrField2DAttrs = read_json_file(&array_dir.join(".zattrs"))?;
+            if zarray.shape != vec![grid.ny, grid.nx] {
+                anyhow::bail!(
+                    "2D array {} shape {:?} does not match grid {}x{}",
+                    array_dir.display(),
+                    zarray.shape,
+                    grid.ny,
+                    grid.nx
+                );
+            }
+            let values = read_array_f32(&array_dir, &zarray)?;
+            Ok(Field2D {
+                metadata: FieldMetadata {
+                    short_name: attrs.short_name,
+                    parameter: attrs.parameter,
+                    units: attrs.units,
+                    level: attrs.level,
+                    source: source.clone(),
+                    run: run.clone(),
+                    valid: valid.clone(),
+                },
+                grid: grid.clone(),
+                values,
+            })
+        })
+        .collect()
+}
+
+fn read_field3d_arrays(
+    store_path: &Path,
+    source: &SourceMetadata,
+    run: &RunMetadata,
+    valid: &ValidTimeMetadata,
+    grid: &GridSpec,
+) -> Result<Vec<Field3D>> {
+    let fields_dir = store_path.join("fields_3d");
+    if !fields_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries: Vec<_> = fs::read_dir(&fields_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|file_type| file_type.is_dir()))
+        .collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    entries
+        .into_iter()
+        .map(|entry| {
+            let array_dir = entry.path();
+            let zarray: ZarrArray = read_json_file(&array_dir.join(".zarray"))?;
+            let attrs: ZarrField3DAttrs = read_json_file(&array_dir.join(".zattrs"))?;
+            let expected_shape = vec![attrs.level_axis.levels.len(), grid.ny, grid.nx];
+            if zarray.shape != expected_shape {
+                anyhow::bail!(
+                    "3D array {} shape {:?} does not match expected {:?}",
+                    array_dir.display(),
+                    zarray.shape,
+                    expected_shape
+                );
+            }
+            let values = read_array_f32(&array_dir, &zarray)?;
+            Ok(Field3D {
+                metadata: FieldMetadata {
+                    short_name: attrs.short_name,
+                    parameter: attrs.parameter,
+                    units: attrs.units,
+                    level: attrs.level.unwrap_or_else(|| attrs.level_axis.kind.clone()),
+                    source: source.clone(),
+                    run: run.clone(),
+                    valid: valid.clone(),
+                },
+                grid: grid.clone(),
+                level_axis: attrs.level_axis,
+                values,
+            })
+        })
+        .collect()
 }
 
 fn write_core_coordinates(
@@ -442,6 +610,7 @@ fn write_field3d_array(
             "short_name": field.metadata.short_name,
             "parameter": field.metadata.parameter,
             "units": field.metadata.units,
+            "level": field.metadata.level,
             "level_axis": field.level_axis,
         }),
     )?;
@@ -584,6 +753,132 @@ fn maybe_compress(data: &[u8], compression_level: u32) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
+fn maybe_decompress(data: &[u8], compressor: Option<&ZarrCompressor>) -> Result<Vec<u8>> {
+    match compressor {
+        None => Ok(data.to_vec()),
+        Some(compressor) if compressor.id == "zlib" => {
+            let mut decoder = ZlibDecoder::new(data);
+            let mut bytes = Vec::new();
+            decoder.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }
+        Some(other) => anyhow::bail!("unsupported Zarr compressor {}", other.id),
+    }
+}
+
+fn read_array_f32(array_dir: &Path, zarray: &ZarrArray) -> Result<Vec<f32>> {
+    match zarray.shape.len() {
+        2 => read_array2_f32(array_dir, zarray),
+        3 => read_array3_f32(array_dir, zarray),
+        other => anyhow::bail!(
+            "unsupported f32 array rank {other} in {}",
+            array_dir.display()
+        ),
+    }
+}
+
+fn read_array2_f32(array_dir: &Path, zarray: &ZarrArray) -> Result<Vec<f32>> {
+    let ny = zarray.shape[0];
+    let nx = zarray.shape[1];
+    let cy = zarray.chunks[0];
+    let cx = zarray.chunks[1];
+    let mut output = vec![f32::NAN; ny * nx];
+
+    for chunk_y in 0..ny.div_ceil(cy) {
+        for chunk_x in 0..nx.div_ceil(cx) {
+            let chunk_path = array_dir.join(format!("{}.{}", chunk_y, chunk_x));
+            let bytes = fs::read(&chunk_path)
+                .with_context(|| format!("failed to read chunk {}", chunk_path.display()))?;
+            let values = decode_f32_values(&maybe_decompress(&bytes, zarray.compressor.as_ref())?)?;
+            if values.len() != cy * cx {
+                anyhow::bail!(
+                    "chunk {} contained {} f32 values, expected {}",
+                    chunk_path.display(),
+                    values.len(),
+                    cy * cx
+                );
+            }
+            let y_start = chunk_y * cy;
+            let x_start = chunk_x * cx;
+            let y_end = (y_start + cy).min(ny);
+            let x_end = (x_start + cx).min(nx);
+            for local_y in 0..(y_end - y_start) {
+                let dst_start = (y_start + local_y) * nx + x_start;
+                let src_start = local_y * cx;
+                let copy_len = x_end - x_start;
+                output[dst_start..dst_start + copy_len]
+                    .copy_from_slice(&values[src_start..src_start + copy_len]);
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn read_array3_f32(array_dir: &Path, zarray: &ZarrArray) -> Result<Vec<f32>> {
+    let nz = zarray.shape[0];
+    let ny = zarray.shape[1];
+    let nx = zarray.shape[2];
+    let cz = zarray.chunks[0];
+    let cy = zarray.chunks[1];
+    let cx = zarray.chunks[2];
+    let mut output = vec![f32::NAN; nz * ny * nx];
+
+    for chunk_z in 0..nz.div_ceil(cz) {
+        for chunk_y in 0..ny.div_ceil(cy) {
+            for chunk_x in 0..nx.div_ceil(cx) {
+                let chunk_path = array_dir.join(format!("{}.{}.{}", chunk_z, chunk_y, chunk_x));
+                let bytes = fs::read(&chunk_path)
+                    .with_context(|| format!("failed to read chunk {}", chunk_path.display()))?;
+                let values =
+                    decode_f32_values(&maybe_decompress(&bytes, zarray.compressor.as_ref())?)?;
+                if values.len() != cz * cy * cx {
+                    anyhow::bail!(
+                        "chunk {} contained {} f32 values, expected {}",
+                        chunk_path.display(),
+                        values.len(),
+                        cz * cy * cx
+                    );
+                }
+                let z_start = chunk_z * cz;
+                let y_start = chunk_y * cy;
+                let x_start = chunk_x * cx;
+                let z_end = (z_start + cz).min(nz);
+                let y_end = (y_start + cy).min(ny);
+                let x_end = (x_start + cx).min(nx);
+
+                for local_z in 0..(z_end - z_start) {
+                    for local_y in 0..(y_end - y_start) {
+                        let dst_start =
+                            (z_start + local_z) * ny * nx + (y_start + local_y) * nx + x_start;
+                        let src_start = local_z * cy * cx + local_y * cx;
+                        let copy_len = x_end - x_start;
+                        output[dst_start..dst_start + copy_len]
+                            .copy_from_slice(&values[src_start..src_start + copy_len]);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn decode_f32_values(bytes: &[u8]) -> Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        anyhow::bail!("f32 chunk byte count {} is not divisible by 4", bytes.len());
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +906,21 @@ mod tests {
                 .iter()
                 .any(|array| array.name == "fields_3d/tmp")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn writer_round_trips_bundle_through_zarr_store() {
+        let root =
+            std::env::temp_dir().join(format!("rustbox-zarr-roundtrip-{}", std::process::id()));
+        let bundle = sample_bundle();
+        let descriptor =
+            write_field_bundle_to_zarr(&bundle, &root, &ZarrWriteConfig::default()).expect("write");
+        let round_trip =
+            read_field_bundle_from_zarr(Path::new(&descriptor.root_path)).expect("read bundle");
+
+        assert_eq!(round_trip, bundle);
 
         let _ = fs::remove_dir_all(root);
     }

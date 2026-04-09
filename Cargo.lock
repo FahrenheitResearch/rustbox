@@ -989,11 +989,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "rayon",
+ "serde",
+ "serde_json",
  "wx-fetch",
  "wx-grib",
  "wx-grid",
  "wx-render",
  "wx-types",
+ "wx-zarr",
 ]
 
 [[package]]
