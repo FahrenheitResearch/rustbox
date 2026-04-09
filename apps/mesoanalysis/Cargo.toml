@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+wx-fetch = { path = "../../crates/wx-fetch" }
+wx-grib = { path = "../../crates/wx-grib" }
+wx-grid = { path = "../../crates/wx-grid" }
 wx-render = { path = "../../crates/wx-render" }
-wx-severe = { path = "../../crates/wx-severe" }
+wx-types = { path = "../../crates/wx-types" }

@@ -1,14 +1,775 @@
-use wx_types::Field2D;
+use anyhow::{Result, bail};
+use rayon::prelude::*;
+use wx_types::{Field2D, FieldMetadata};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct LayerKinematics {
-    pub srh_01km_m2s2: f32,
-    pub srh_03km_m2s2: f32,
-    pub bulk_shear_06km_ms: f32,
+pub struct FieldSummary {
+    pub finite_count: usize,
+    pub min_value: f32,
+    pub max_value: f32,
+    pub mean_value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSpec {
+    pub window_nx: usize,
+    pub window_ny: usize,
+    pub passes: usize,
+    pub normalize_weights: bool,
 }
 
 pub fn summarize_grid(field: &Field2D) -> Option<(f32, f32)> {
-    let min = field.values.iter().copied().reduce(f32::min)?;
-    let max = field.values.iter().copied().reduce(f32::max)?;
-    Some((min, max))
+    field_stats(field).map(|summary| (summary.min_value, summary.max_value))
+}
+
+pub fn field_stats(field: &Field2D) -> Option<FieldSummary> {
+    let mut finite_count = 0usize;
+    let mut min_value = f32::INFINITY;
+    let mut max_value = f32::NEG_INFINITY;
+    let mut sum = 0.0f64;
+
+    for value in &field.values {
+        if value.is_finite() {
+            finite_count += 1;
+            min_value = min_value.min(*value);
+            max_value = max_value.max(*value);
+            sum += *value as f64;
+        }
+    }
+
+    if finite_count == 0 {
+        None
+    } else {
+        Some(FieldSummary {
+            finite_count,
+            min_value,
+            max_value,
+            mean_value: sum / finite_count as f64,
+        })
+    }
+}
+
+pub fn gradient_x(values: &[f64], nx: usize, ny: usize, dx: f64) -> Vec<f64> {
+    assert_eq!(values.len(), nx * ny, "values length must equal nx * ny");
+    let inv_2dx = 1.0 / (2.0 * dx);
+    let inv_dx = 1.0 / dx;
+
+    let rows: Vec<Vec<f64>> = (0..ny)
+        .into_par_iter()
+        .map(|j| {
+            (0..nx)
+                .map(|i| {
+                    if nx < 2 {
+                        0.0
+                    } else if nx == 2 {
+                        (values[idx(j, 1, nx)] - values[idx(j, 0, nx)]) * inv_dx
+                    } else if i == 0 {
+                        (-3.0 * values[idx(j, 0, nx)] + 4.0 * values[idx(j, 1, nx)]
+                            - values[idx(j, 2, nx)])
+                            * inv_2dx
+                    } else if i == nx - 1 {
+                        (3.0 * values[idx(j, nx - 1, nx)] - 4.0 * values[idx(j, nx - 2, nx)]
+                            + values[idx(j, nx - 3, nx)])
+                            * inv_2dx
+                    } else {
+                        (values[idx(j, i + 1, nx)] - values[idx(j, i - 1, nx)]) * inv_2dx
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    rows.into_iter().flatten().collect()
+}
+
+pub fn gradient_y(values: &[f64], nx: usize, ny: usize, dy: f64) -> Vec<f64> {
+    assert_eq!(values.len(), nx * ny, "values length must equal nx * ny");
+    let inv_2dy = 1.0 / (2.0 * dy);
+    let inv_dy = 1.0 / dy;
+
+    let rows: Vec<Vec<f64>> = (0..ny)
+        .into_par_iter()
+        .map(|j| {
+            (0..nx)
+                .map(|i| {
+                    if ny < 2 {
+                        0.0
+                    } else if ny == 2 {
+                        (values[idx(1, i, nx)] - values[idx(0, i, nx)]) * inv_dy
+                    } else if j == 0 {
+                        (-3.0 * values[idx(0, i, nx)] + 4.0 * values[idx(1, i, nx)]
+                            - values[idx(2, i, nx)])
+                            * inv_2dy
+                    } else if j == ny - 1 {
+                        (3.0 * values[idx(ny - 1, i, nx)] - 4.0 * values[idx(ny - 2, i, nx)]
+                            + values[idx(ny - 3, i, nx)])
+                            * inv_2dy
+                    } else {
+                        (values[idx(j + 1, i, nx)] - values[idx(j - 1, i, nx)]) * inv_2dy
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    rows.into_iter().flatten().collect()
+}
+
+pub fn laplacian(values: &[f64], nx: usize, ny: usize, dx: f64, dy: f64) -> Vec<f64> {
+    assert_eq!(values.len(), nx * ny, "values length must equal nx * ny");
+    let inv_dx2 = 1.0 / (dx * dx);
+    let inv_dy2 = 1.0 / (dy * dy);
+
+    let rows: Vec<Vec<f64>> = (0..ny)
+        .into_par_iter()
+        .map(|j| {
+            (0..nx)
+                .map(|i| {
+                    let d2x = if nx < 3 {
+                        0.0
+                    } else if i == 0 {
+                        (values[idx(j, 2, nx)] - 2.0 * values[idx(j, 1, nx)]
+                            + values[idx(j, 0, nx)])
+                            * inv_dx2
+                    } else if i == nx - 1 {
+                        (values[idx(j, nx - 1, nx)] - 2.0 * values[idx(j, nx - 2, nx)]
+                            + values[idx(j, nx - 3, nx)])
+                            * inv_dx2
+                    } else {
+                        (values[idx(j, i + 1, nx)] - 2.0 * values[idx(j, i, nx)]
+                            + values[idx(j, i - 1, nx)])
+                            * inv_dx2
+                    };
+                    let d2y = if ny < 3 {
+                        0.0
+                    } else if j == 0 {
+                        (values[idx(2, i, nx)] - 2.0 * values[idx(1, i, nx)]
+                            + values[idx(0, i, nx)])
+                            * inv_dy2
+                    } else if j == ny - 1 {
+                        (values[idx(ny - 1, i, nx)] - 2.0 * values[idx(ny - 2, i, nx)]
+                            + values[idx(ny - 3, i, nx)])
+                            * inv_dy2
+                    } else {
+                        (values[idx(j + 1, i, nx)] - 2.0 * values[idx(j, i, nx)]
+                            + values[idx(j - 1, i, nx)])
+                            * inv_dy2
+                    };
+                    d2x + d2y
+                })
+                .collect()
+        })
+        .collect();
+    rows.into_iter().flatten().collect()
+}
+
+pub fn divergence(u: &[f64], v: &[f64], nx: usize, ny: usize, dx: f64, dy: f64) -> Vec<f64> {
+    let dudx = gradient_x(u, nx, ny, dx);
+    let dvdy = gradient_y(v, nx, ny, dy);
+    dudx.par_iter()
+        .zip(dvdy.par_iter())
+        .map(|(a, b)| a + b)
+        .collect()
+}
+
+pub fn vorticity(u: &[f64], v: &[f64], nx: usize, ny: usize, dx: f64, dy: f64) -> Vec<f64> {
+    let dvdx = gradient_x(v, nx, ny, dx);
+    let dudy = gradient_y(u, nx, ny, dy);
+    dvdx.par_iter()
+        .zip(dudy.par_iter())
+        .map(|(a, b)| a - b)
+        .collect()
+}
+
+pub fn advection(
+    scalar: &[f64],
+    u: &[f64],
+    v: &[f64],
+    nx: usize,
+    ny: usize,
+    dx: f64,
+    dy: f64,
+) -> Vec<f64> {
+    let dsdx = gradient_x(scalar, nx, ny, dx);
+    let dsdy = gradient_y(scalar, nx, ny, dy);
+    (0..nx * ny)
+        .into_par_iter()
+        .map(|index| -u[index] * dsdx[index] - v[index] * dsdy[index])
+        .collect()
+}
+
+pub fn frontogenesis(
+    theta: &[f64],
+    u: &[f64],
+    v: &[f64],
+    nx: usize,
+    ny: usize,
+    dx: f64,
+    dy: f64,
+) -> Vec<f64> {
+    let dtdx = gradient_x(theta, nx, ny, dx);
+    let dtdy = gradient_y(theta, nx, ny, dy);
+    let dudx = gradient_x(u, nx, ny, dx);
+    let dvdy = gradient_y(v, nx, ny, dy);
+    let dvdx = gradient_x(v, nx, ny, dx);
+    let dudy = gradient_y(u, nx, ny, dy);
+
+    let mut out = vec![0.0; nx * ny];
+    for index in 0..out.len() {
+        let gradient_magnitude = (dtdx[index] * dtdx[index] + dtdy[index] * dtdy[index]).sqrt();
+        if gradient_magnitude < 1e-20 {
+            continue;
+        }
+
+        out[index] = -(dtdx[index] * dtdx[index] * dudx[index]
+            + dtdy[index] * dtdy[index] * dvdy[index]
+            + dtdx[index] * dtdy[index] * (dvdx[index] + dudy[index]))
+            / gradient_magnitude;
+    }
+
+    out
+}
+
+pub fn smooth_window(
+    data: &[f64],
+    nx: usize,
+    ny: usize,
+    window: &[f64],
+    spec: WindowSpec,
+) -> Vec<f64> {
+    let expected_len = nx * ny;
+    assert_eq!(data.len(), expected_len, "data length must equal nx * ny");
+    assert_eq!(
+        window.len(),
+        spec.window_nx * spec.window_ny,
+        "window length must equal window_nx * window_ny"
+    );
+    assert!(spec.window_nx > 0, "window_nx must be > 0");
+    assert!(spec.window_ny > 0, "window_ny must be > 0");
+
+    let half_x = spec.window_nx / 2;
+    let half_y = spec.window_ny / 2;
+    let weights: Vec<f64> = if spec.normalize_weights {
+        let weight_sum: f64 = window.iter().sum();
+        if weight_sum.abs() > 1e-30 {
+            window.iter().map(|weight| weight / weight_sum).collect()
+        } else {
+            window.to_vec()
+        }
+    } else {
+        window.to_vec()
+    };
+
+    let mut current = data.to_vec();
+    for _ in 0..spec.passes {
+        let mut out = current.clone();
+        let j_start = half_y;
+        let j_end = ny.saturating_sub(half_y);
+
+        if j_end > j_start {
+            let interior_rows = j_end - j_start;
+            let mut interior = vec![0.0; interior_rows * nx];
+
+            interior
+                .par_chunks_mut(nx)
+                .enumerate()
+                .for_each(|(row_index, row)| {
+                    let j = j_start + row_index;
+                    row.copy_from_slice(&current[j * nx..(j + 1) * nx]);
+
+                    for (i, cell) in row
+                        .iter_mut()
+                        .enumerate()
+                        .take(nx.saturating_sub(half_x))
+                        .skip(half_x)
+                    {
+                        let mut weighted_sum = 0.0;
+                        let mut has_nan = false;
+
+                        'kernel: for window_j in 0..spec.window_ny {
+                            let jj = j + window_j - half_y;
+                            for window_i in 0..spec.window_nx {
+                                let ii = i + window_i - half_x;
+                                let value = current[jj * nx + ii];
+                                if value.is_nan() {
+                                    has_nan = true;
+                                    break 'kernel;
+                                }
+                                weighted_sum +=
+                                    weights[window_j * spec.window_nx + window_i] * value;
+                            }
+                        }
+
+                        *cell = if has_nan { f64::NAN } else { weighted_sum };
+                    }
+                });
+
+            for (row_index, chunk) in interior.chunks(nx).enumerate() {
+                let j = j_start + row_index;
+                out[j * nx..(j + 1) * nx].copy_from_slice(chunk);
+            }
+        }
+
+        current = out;
+    }
+
+    current
+}
+
+pub fn smooth_n_point(data: &[f64], nx: usize, ny: usize, n: usize, passes: usize) -> Vec<f64> {
+    assert!(n == 5 || n == 9, "n must be 5 or 9, got {n}");
+    let kernel = if n == 9 {
+        vec![
+            0.0625, 0.125, 0.0625, 0.125, 0.25, 0.125, 0.0625, 0.125, 0.0625,
+        ]
+    } else {
+        vec![0.0, 0.125, 0.0, 0.125, 0.5, 0.125, 0.0, 0.125, 0.0]
+    };
+
+    smooth_window(
+        data,
+        nx,
+        ny,
+        &kernel,
+        WindowSpec {
+            window_nx: 3,
+            window_ny: 3,
+            passes,
+            normalize_weights: false,
+        },
+    )
+}
+
+pub fn gradient_x_field(field: &Field2D) -> Result<Field2D> {
+    validate_scalar_field(field)?;
+    let units = format!("{}/m", field.metadata.units);
+    derived_scalar_field(
+        field,
+        "DTDX",
+        "X gradient",
+        &units,
+        gradient_x(
+            &field_to_f64(field),
+            field.grid.nx,
+            field.grid.ny,
+            field.grid.coordinates.dx,
+        ),
+    )
+}
+
+pub fn gradient_y_field(field: &Field2D) -> Result<Field2D> {
+    validate_scalar_field(field)?;
+    let units = format!("{}/m", field.metadata.units);
+    derived_scalar_field(
+        field,
+        "DTDY",
+        "Y gradient",
+        &units,
+        gradient_y(
+            &field_to_f64(field),
+            field.grid.nx,
+            field.grid.ny,
+            field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn laplacian_field(field: &Field2D) -> Result<Field2D> {
+    validate_scalar_field(field)?;
+    let units = format!("{}/m^2", field.metadata.units);
+    derived_scalar_field(
+        field,
+        "LAPL",
+        "Laplacian",
+        &units,
+        laplacian(
+            &field_to_f64(field),
+            field.grid.nx,
+            field.grid.ny,
+            field.grid.coordinates.dx,
+            field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn divergence_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
+    validate_vector_pair(u_field, v_field)?;
+    derived_scalar_field(
+        u_field,
+        "DIV",
+        "Horizontal divergence",
+        "s^-1",
+        divergence(
+            &field_to_f64(u_field),
+            &field_to_f64(v_field),
+            u_field.grid.nx,
+            u_field.grid.ny,
+            u_field.grid.coordinates.dx,
+            u_field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn vorticity_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
+    validate_vector_pair(u_field, v_field)?;
+    derived_scalar_field(
+        u_field,
+        "VORT",
+        "Relative vorticity",
+        "s^-1",
+        vorticity(
+            &field_to_f64(u_field),
+            &field_to_f64(v_field),
+            u_field.grid.nx,
+            u_field.grid.ny,
+            u_field.grid.coordinates.dx,
+            u_field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn advection_field(
+    scalar_field: &Field2D,
+    u_field: &Field2D,
+    v_field: &Field2D,
+) -> Result<Field2D> {
+    validate_scalar_field(scalar_field)?;
+    validate_vector_pair(u_field, v_field)?;
+    ensure_compatible_fields(scalar_field, u_field, "scalar and u-component")?;
+    ensure_compatible_fields(scalar_field, v_field, "scalar and v-component")?;
+    let units = format!("{}/s", scalar_field.metadata.units);
+
+    derived_scalar_field(
+        scalar_field,
+        "ADV",
+        "Scalar advection",
+        &units,
+        advection(
+            &field_to_f64(scalar_field),
+            &field_to_f64(u_field),
+            &field_to_f64(v_field),
+            scalar_field.grid.nx,
+            scalar_field.grid.ny,
+            scalar_field.grid.coordinates.dx,
+            scalar_field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn frontogenesis_field(
+    theta_field: &Field2D,
+    u_field: &Field2D,
+    v_field: &Field2D,
+) -> Result<Field2D> {
+    validate_scalar_field(theta_field)?;
+    validate_vector_pair(u_field, v_field)?;
+    ensure_compatible_fields(theta_field, u_field, "theta and u-component")?;
+    ensure_compatible_fields(theta_field, v_field, "theta and v-component")?;
+
+    derived_scalar_field(
+        theta_field,
+        "FGEN",
+        "Petterssen frontogenesis",
+        "K m^-1 s^-1",
+        frontogenesis(
+            &field_to_f64(theta_field),
+            &field_to_f64(u_field),
+            &field_to_f64(v_field),
+            theta_field.grid.nx,
+            theta_field.grid.ny,
+            theta_field.grid.coordinates.dx,
+            theta_field.grid.coordinates.dy,
+        ),
+    )
+}
+
+pub fn smooth_n_point_field(field: &Field2D, n: usize, passes: usize) -> Result<Field2D> {
+    validate_scalar_field(field)?;
+    derived_scalar_field(
+        field,
+        if n == 5 { "SM5" } else { "SM9" },
+        &format!("{n}-point smoothed {}", field.metadata.parameter),
+        &field.metadata.units,
+        smooth_n_point(
+            &field_to_f64(field),
+            field.grid.nx,
+            field.grid.ny,
+            n,
+            passes,
+        ),
+    )
+}
+
+fn validate_scalar_field(field: &Field2D) -> Result<()> {
+    if field.values.len() != field.expected_len() {
+        bail!(
+            "field {} has {} values but grid expects {}",
+            field.metadata.short_name,
+            field.values.len(),
+            field.expected_len()
+        );
+    }
+    if field.grid.coordinates.dx <= 0.0 || field.grid.coordinates.dy <= 0.0 {
+        bail!(
+            "field {} has non-positive grid spacing dx={} dy={}",
+            field.metadata.short_name,
+            field.grid.coordinates.dx,
+            field.grid.coordinates.dy
+        );
+    }
+    Ok(())
+}
+
+fn validate_vector_pair(u_field: &Field2D, v_field: &Field2D) -> Result<()> {
+    validate_scalar_field(u_field)?;
+    validate_scalar_field(v_field)?;
+    ensure_compatible_fields(u_field, v_field, "u and v wind components")
+}
+
+fn ensure_compatible_fields(left: &Field2D, right: &Field2D, label: &str) -> Result<()> {
+    if left.grid != right.grid {
+        bail!("{label} use incompatible grid geometry");
+    }
+    if left.metadata.source != right.metadata.source {
+        bail!("{label} use incompatible source metadata");
+    }
+    if left.metadata.run != right.metadata.run {
+        bail!("{label} use incompatible run metadata");
+    }
+    if left.metadata.valid != right.metadata.valid {
+        bail!("{label} use incompatible valid times");
+    }
+    if left.metadata.level != right.metadata.level {
+        bail!("{label} use incompatible levels");
+    }
+    Ok(())
+}
+
+fn derived_scalar_field(
+    template: &Field2D,
+    short_name: &str,
+    parameter: &str,
+    units: &str,
+    values: Vec<f64>,
+) -> Result<Field2D> {
+    if values.len() != template.expected_len() {
+        bail!(
+            "derived field {} produced {} values but grid expects {}",
+            short_name,
+            values.len(),
+            template.expected_len()
+        );
+    }
+
+    let mut metadata: FieldMetadata = template.metadata.clone();
+    metadata.short_name = short_name.to_string();
+    metadata.parameter = parameter.to_string();
+    metadata.units = units.to_string();
+
+    Ok(Field2D {
+        metadata,
+        grid: template.grid.clone(),
+        values: values.into_iter().map(|value| value as f32).collect(),
+    })
+}
+
+fn field_to_f64(field: &Field2D) -> Vec<f64> {
+    field.values.iter().map(|value| *value as f64).collect()
+}
+
+#[inline(always)]
+fn idx(j: usize, i: usize, nx: usize) -> usize {
+    j * nx + i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use std::path::PathBuf;
+    use wx_fetch::{HrrrSelectionRequest, HrrrSubsetRequest, plan_hrrr_fixture_subset};
+    use wx_grib::decode_selected_messages;
+
+    fn approx(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() < tolerance,
+            "expected {expected}, got {actual} (diff {}, tol {tolerance})",
+            (actual - expected).abs()
+        );
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures")
+            .join(name)
+    }
+
+    fn pressure_fixture_request(cycle: chrono::DateTime<Utc>) -> HrrrSubsetRequest {
+        HrrrSubsetRequest {
+            cycle,
+            forecast_hour: 0,
+            product: "prs".to_string(),
+            selections: vec![
+                HrrrSelectionRequest {
+                    variable: "TMP".to_string(),
+                    level: "850 mb".to_string(),
+                    forecast: Some("anl".to_string()),
+                },
+                HrrrSelectionRequest {
+                    variable: "UGRD".to_string(),
+                    level: "850 mb".to_string(),
+                    forecast: Some("anl".to_string()),
+                },
+                HrrrSelectionRequest {
+                    variable: "VGRD".to_string(),
+                    level: "850 mb".to_string(),
+                    forecast: Some("anl".to_string()),
+                },
+            ],
+        }
+    }
+
+    fn decode_pressure_fixture_fields() -> Vec<Field2D> {
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid fixture cycle");
+        let fragment = fixture_path("hrrr_demo_pressure_fragment.grib2");
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_demo_pressure_fragment.idx"))
+            .expect("pressure idx fixture should be readable");
+        let plan = plan_hrrr_fixture_subset(
+            &pressure_fixture_request(cycle),
+            &idx_text,
+            std::fs::metadata(&fragment)
+                .expect("pressure fixture should exist")
+                .len(),
+        )
+        .expect("fixture plan should succeed");
+        decode_selected_messages(&fragment, &plan)
+            .expect("fixture decode should succeed")
+            .into_iter()
+            .map(|message| message.field)
+            .collect()
+    }
+
+    fn select_field<'a>(fields: &'a [Field2D], short_name: &str) -> &'a Field2D {
+        fields
+            .iter()
+            .find(|field| field.metadata.short_name == short_name)
+            .unwrap_or_else(|| panic!("missing {short_name} in decoded fixture"))
+    }
+
+    #[test]
+    fn linear_field_gradients_are_exact() {
+        let nx = 5;
+        let ny = 5;
+        let dx = 2.0;
+        let dy = 4.0;
+        let mut values = vec![0.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                values[idx(j, i, nx)] = 3.0 * i as f64 + 5.0 * j as f64;
+            }
+        }
+
+        let dfdx = gradient_x(&values, nx, ny, dx);
+        let dfdy = gradient_y(&values, nx, ny, dy);
+        for value in dfdx {
+            approx(value, 1.5, 1e-10);
+        }
+        for value in dfdy {
+            approx(value, 1.25, 1e-10);
+        }
+    }
+
+    #[test]
+    fn solid_body_rotation_has_zero_divergence_and_two_unit_vorticity() {
+        let nx = 7;
+        let ny = 7;
+        let mut u = vec![0.0; nx * ny];
+        let mut v = vec![0.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                u[idx(j, i, nx)] = -(j as f64);
+                v[idx(j, i, nx)] = i as f64;
+            }
+        }
+
+        let divergence = divergence(&u, &v, nx, ny, 1.0, 1.0);
+        let vorticity = vorticity(&u, &v, nx, ny, 1.0, 1.0);
+        for j in 1..ny - 1 {
+            for i in 1..nx - 1 {
+                let index = idx(j, i, nx);
+                approx(divergence[index], 0.0, 1e-10);
+                approx(vorticity[index], 2.0, 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn linear_theta_with_uniform_flow_has_zero_frontogenesis() {
+        let nx = 6;
+        let ny = 6;
+        let mut theta = vec![0.0; nx * ny];
+        let u = vec![10.0; nx * ny];
+        let v = vec![5.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                theta[idx(j, i, nx)] = 290.0 + i as f64 + j as f64;
+            }
+        }
+
+        let frontogenesis = frontogenesis(&theta, &u, &v, nx, ny, 1_000.0, 1_000.0);
+        for value in frontogenesis {
+            approx(value, 0.0, 1e-10);
+        }
+    }
+
+    #[test]
+    fn nine_point_smoother_preserves_linear_fields() {
+        let nx = 7;
+        let ny = 7;
+        let mut values = vec![0.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                values[idx(j, i, nx)] = 2.0 * i as f64 + 3.0 * j as f64;
+            }
+        }
+
+        let smoothed = smooth_n_point(&values, nx, ny, 9, 1);
+        for j in 1..ny - 1 {
+            for i in 1..nx - 1 {
+                let index = idx(j, i, nx);
+                approx(smoothed[index], values[index], 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_backed_vorticity_and_frontogenesis_are_finite() {
+        let fields = decode_pressure_fixture_fields();
+        let temperature = select_field(&fields, "TMP");
+        let u_wind = select_field(&fields, "UGRD");
+        let v_wind = select_field(&fields, "VGRD");
+
+        let vorticity = vorticity_field(u_wind, v_wind).expect("vorticity should succeed");
+        let smoothed_vorticity =
+            smooth_n_point_field(&vorticity, 9, 1).expect("smoothing should succeed");
+        let frontogenesis =
+            frontogenesis_field(temperature, u_wind, v_wind).expect("frontogenesis should succeed");
+
+        assert_eq!(vorticity.grid, u_wind.grid);
+        assert_eq!(frontogenesis.grid, temperature.grid);
+
+        let vort_stats = field_stats(&vorticity).expect("vorticity should contain finite values");
+        let smooth_stats =
+            field_stats(&smoothed_vorticity).expect("smoothed vorticity should be finite");
+        let fronto_stats =
+            field_stats(&frontogenesis).expect("frontogenesis should contain finite values");
+
+        assert!(vort_stats.max_value.is_finite());
+        assert!(fronto_stats.max_value.is_finite());
+        assert!(smooth_stats.max_value.abs() <= vort_stats.max_value.abs() + 1e-6);
+        assert_eq!(vorticity.metadata.short_name, "VORT");
+        assert_eq!(smoothed_vorticity.metadata.short_name, "SM9");
+        assert_eq!(frontogenesis.metadata.short_name, "FGEN");
+    }
 }

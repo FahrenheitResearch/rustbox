@@ -5,5 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+rayon.workspace = true
 wx-types = { path = "../wx-types" }
 
+[dev-dependencies]
+chrono.workspace = true
+wx-fetch = { path = "../wx-fetch" }
+wx-grib = { path = "../wx-grib" }

@@ -172,6 +172,16 @@ fn plan_hrrr_subset_with_context(
                 request.cycle
             );
         }
+        if let Some(entry_forecast_hour) = forecast_hour_from_idx_forecast(&entry.forecast)
+            && entry_forecast_hour != request.forecast_hour
+        {
+            bail!(
+                "idx entry {} forecast semantics resolve to f{:02}, not requested f{:02}",
+                selector_label(wanted),
+                entry_forecast_hour,
+                request.forecast_hour
+            );
+        }
 
         let end_exclusive = entries
             .get(entry_index + 1)
@@ -238,6 +248,46 @@ fn selector_label(request: &HrrrSelectionRequest) -> String {
         Some(forecast) => format!("{}:{}:{}", request.variable, request.level, forecast),
         None => format!("{}:{}", request.variable, request.level),
     }
+}
+
+fn forecast_hour_from_idx_forecast(forecast: &str) -> Option<u16> {
+    let trimmed = forecast.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+
+    if matches!(normalized.as_str(), "anl" | "analysis" | "2dvaranl") {
+        return Some(0);
+    }
+    if let Some((_, end_hour)) = parse_time_range(&normalized) {
+        return u16::try_from(end_hour).ok();
+    }
+
+    parse_single_hour(&normalized).and_then(|hour| u16::try_from(hour).ok())
+}
+
+fn parse_time_range(forecast: &str) -> Option<(u32, u32)> {
+    let parts: Vec<&str> = forecast.split_whitespace().collect();
+    for (index, part) in parts.iter().enumerate() {
+        if part.contains('-') && index + 1 < parts.len() && parts[index + 1].starts_with("hr") {
+            let range_parts: Vec<&str> = part.split('-').collect();
+            if range_parts.len() == 2
+                && let (Ok(start), Ok(end)) =
+                    (range_parts[0].parse::<u32>(), range_parts[1].parse::<u32>())
+            {
+                return Some((start, end));
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_single_hour(forecast: &str) -> Option<u32> {
+    let parts: Vec<&str> = forecast.split_whitespace().collect();
+    if parts.len() < 3 || parts[1] != "hr" || !parts[2].ends_with("fcst") {
+        return None;
+    }
+
+    parts[0].parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -406,6 +456,37 @@ mod tests {
 
         assert!(
             error.to_string().contains("does not match requested cycle"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn plan_hrrr_subset_rejects_forecast_hour_semantic_mismatches() {
+        let idx_text = "1:0:d=2024040100:TMP:500 mb:1 hr fcst:";
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+
+        let error = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "prs".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "TMP".to_string(),
+                    level: "500 mb".to_string(),
+                    forecast: Some("1 hr fcst".to_string()),
+                }],
+            },
+            idx_text,
+        )
+        .expect_err("forecast hour mismatch should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("forecast semantics resolve to f01"),
             "unexpected error: {error}"
         );
     }

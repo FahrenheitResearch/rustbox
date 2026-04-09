@@ -647,8 +647,13 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 name = "mesoanalysis-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "wx-fetch",
+ "wx-grib",
+ "wx-grid",
  "wx-render",
- "wx-severe",
+ "wx-types",
 ]
 
 [[package]]
@@ -1481,6 +1486,11 @@ dependencies = [
 name = "wx-grid"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "chrono",
+ "rayon",
+ "wx-fetch",
+ "wx-grib",
  "wx-types",
 ]
 

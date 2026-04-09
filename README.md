@@ -50,14 +50,17 @@ rustbox/
 - `wx-grib` can decode real GRIB2 fixture fragments, including multi-message surface and pressure-level paths, and now fails if a selected slice contains anything other than exactly one GRIB2 message.
 - `wx-grib` can extract one fixed HRRR model column into `wx-types::SoundingProfile`, with bundle-consistency checks across the decoded fields.
 - `wx-thermo` computes real `sharprs`-derived SBCAPE, MLCAPE, MUCAPE, and CIN.
+- `wx-grid` computes real finite-difference divergence, vorticity, advection, frontogenesis, and MetPy-style 5/9-point smoothing from `Field2D` inputs.
 - `wx-severe` computes fixed-layer STP plus exact-layer kinematics from a local compatibility fork of the pinned `sharprs` `winds.rs` logic, including a narrow endpoint-wind fallback where the direct upstream helicity path still fails on the checked-in fixture profile.
 - `wx-render` writes a real transparent PNG overlay from a decoded scalar field.
 - `cargo run -p wx-cli -- demo` now uses one coherent HRRR-based path from checked-in fixtures.
+- `cargo run -p mesoanalysis-app -- demo` now decodes the checked-in HRRR 850 mb pressure fixture, computes vorticity/frontogenesis, smooths the vorticity field, and writes a real PNG overlay.
 
 ## What Is Still Stubbed
 
 - `wx-cuda` remains a capability stub only.
-- `wx-radar`, `wx-wrf`, `wx-zarr`, and `wx-py` are not part of the implemented slice yet.
+- `wx-radar`, `wx-wrf`, `wx-zarr`, and `wx-py` are not part of the implemented science surface yet.
+- `radar-viewer` and `open-wx-api-rs` are still scaffold apps.
 - Python compatibility packaging is not implemented.
 - `rustbox` still depends on pinned upstream `grib-core` and `sharprs` crates rather than fully owning those cores locally.
 - The direct pinned `sharprs::winds::helicity` call path still fails on the checked-in fixture profile; `rustbox` keeps a documented exact-layer local port while that upstream issue remains unresolved.

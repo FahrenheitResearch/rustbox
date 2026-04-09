@@ -7,6 +7,10 @@ const WINDS_PALETTE: &[&str] = &[
     "#ffffff", "#87cefa", "#6a5acd", "#e696dc", "#c85abe", "#a01496", "#c80028", "#dc283c",
     "#f05050", "#faf064", "#dcbe46", "#be8c28", "#a05a0a",
 ];
+const VORTICITY_PALETTE: &[&str] = &[
+    "#1f3b73", "#2f5d9b", "#4d88bf", "#84b6d8", "#d7e8f4", "#f8f8f8", "#f4d3cf", "#dd8f84",
+    "#c8574c", "#a62b26", "#7f0000",
+];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlaySpec {
@@ -89,6 +93,10 @@ pub fn render_field_to_png(
 fn palette_by_name(name: &str) -> Result<Vec<Rgba<u8>>> {
     match name {
         "winds" => Ok(WINDS_PALETTE.iter().map(|hex| rgba_from_hex(hex)).collect()),
+        "vorticity" => Ok(VORTICITY_PALETTE
+            .iter()
+            .map(|hex| rgba_from_hex(hex))
+            .collect()),
         other => bail!("unsupported palette '{}'", other),
     }
 }

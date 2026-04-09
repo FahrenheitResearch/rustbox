@@ -48,7 +48,8 @@ pub fn decode_selected_messages(
     Ok(decoded)
 }
 
-pub fn find_valid_hrrr_profile_point(
+#[cfg(test)]
+fn find_valid_hrrr_profile_point(
     surface_messages: &[DecodedMessage],
     pressure_messages: &[DecodedMessage],
 ) -> Result<(usize, usize)> {
@@ -144,6 +145,7 @@ fn decode_message_bytes(
         .messages
         .first()
         .context("selected GRIB2 bytes did not contain any messages")?;
+    validate_selection_matches_message(selection, message)?;
     let reference_time = utc_from_naive(message.reference_time);
     let forecast_duration = forecast_duration(
         message.product.forecast_time,
@@ -188,7 +190,13 @@ fn decode_message_bytes(
 
     Ok(Field2D {
         metadata: FieldMetadata {
-            short_name: selection.variable.clone(),
+            short_name: decoded_short_name(
+                message.discipline,
+                message.product.parameter_category,
+                message.product.parameter_number,
+            )
+            .unwrap_or(selection.variable.as_str())
+            .to_string(),
             parameter: parameter_name(
                 message.discipline,
                 message.product.parameter_category,
@@ -205,6 +213,7 @@ fn decode_message_bytes(
                 code: message.product.level_type,
                 description: canonical_level_description(
                     message.product.level_type,
+                    message.product.level_value,
                     level_name(message.product.level_type),
                 ),
                 value: Some(canonical_level_value(
@@ -531,6 +540,79 @@ fn validate_plan_matches_message(
     Ok(())
 }
 
+fn validate_selection_matches_message(
+    selection: &SubsetMessageRef,
+    message: &grib_core::grib2::Grib2Message,
+) -> Result<()> {
+    let decoded_variable = decoded_short_name(
+        message.discipline,
+        message.product.parameter_category,
+        message.product.parameter_number,
+    )
+    .context("decoded GRIB message did not map to a supported rustbox short name")?;
+    if !decoded_variable.eq_ignore_ascii_case(selection.variable.trim()) {
+        bail!(
+            "subset selection expected variable {} but decoded GRIB message is {}",
+            selection.variable,
+            decoded_variable
+        );
+    }
+    if !selection_level_matches_message(
+        &selection.level,
+        message.product.level_type,
+        message.product.level_value,
+    ) {
+        bail!(
+            "subset selection expected level {} but decoded GRIB message is {}",
+            selection.level,
+            canonical_level_description(
+                message.product.level_type,
+                message.product.level_value,
+                level_name(message.product.level_type)
+            )
+        );
+    }
+
+    Ok(())
+}
+
+fn decoded_short_name(discipline: u8, category: u8, number: u8) -> Option<&'static str> {
+    match (discipline, category, number) {
+        (0, 0, 0) => Some("TMP"),
+        (0, 0, 6) => Some("DPT"),
+        (0, 1, 1) => Some("RH"),
+        (0, 2, 2) => Some("UGRD"),
+        (0, 2, 3) => Some("VGRD"),
+        (0, 2, 22) => Some("GUST"),
+        (0, 3, 0) => Some("PRES"),
+        (0, 3, 5) => Some("HGT"),
+        _ => None,
+    }
+}
+
+fn selection_level_matches_message(selection_level: &str, level_type: u8, raw_value: f64) -> bool {
+    let normalized = selection_level.trim().to_ascii_lowercase();
+    if normalized == "surface" {
+        return level_type == 1;
+    }
+    if let Some(hpa) = parse_level_value(&normalized, "mb") {
+        return level_type == 100
+            && (canonical_level_value(level_type, raw_value) - hpa).abs() < 1e-6;
+    }
+    if let Some(meters) = parse_level_value(&normalized, "m above ground") {
+        return level_type == 103
+            && (canonical_level_value(level_type, raw_value) - meters).abs() < 1e-6;
+    }
+
+    canonical_level_description(level_type, raw_value, level_name(level_type))
+        .eq_ignore_ascii_case(selection_level.trim())
+}
+
+fn parse_level_value(level: &str, suffix: &str) -> Option<f64> {
+    let value = level.strip_suffix(suffix)?.trim();
+    value.parse::<f64>().ok()
+}
+
 fn level_units(level_type: u8) -> &'static str {
     match level_type {
         100 => "hPa",
@@ -546,9 +628,14 @@ fn canonical_level_value(level_type: u8, raw_value: f64) -> f64 {
     }
 }
 
-fn canonical_level_description(level_type: u8, default_name: &str) -> String {
+fn canonical_level_description(level_type: u8, raw_value: f64, default_name: &str) -> String {
     match level_type {
         1 => "surface".to_string(),
+        100 => format!("{:.0} mb", canonical_level_value(level_type, raw_value)),
+        103 => format!(
+            "{:.0} m above ground",
+            canonical_level_value(level_type, raw_value)
+        ),
         _ => default_name.to_string(),
     }
 }
@@ -817,6 +904,121 @@ mod tests {
             error
                 .to_string()
                 .contains("does not match decoded message forecast hour"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_variable_identity_mismatches() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        plan.selections[0].variable = "PRES".to_string();
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("variable mismatch should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected variable PRES but decoded GRIB message is GUST"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_level_identity_mismatches() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        plan.selections[0].level = "250 mb".to_string();
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("level mismatch should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected level 250 mb but decoded GRIB message is surface"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_wrong_message_identity_even_when_time_matches() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+
+        let second_message_start = 1_136_310;
+        let second_message_end =
+            std::fs::metadata(fixture_path("hrrr_gust_surface_fragment.grib2"))
+                .expect("fixture should exist")
+                .len();
+        plan.selections[0].start = second_message_start;
+        plan.selections[0].end_exclusive = second_message_end;
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("wrong-message identity should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected variable GUST but decoded GRIB message is UGRD"),
             "unexpected error: {error}"
         );
     }

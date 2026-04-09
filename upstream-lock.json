@@ -29,6 +29,12 @@
       "url": "https://github.com/FahrenheitResearch/wrf-rust-plots.git",
       "commit": "2088e9599dcf7c7e55be5261c935a48c7afbdd60",
       "purpose": "Palette and native rendering reference"
+    },
+    {
+      "name": "metrust-py",
+      "url": "https://github.com/FahrenheitResearch/metrust-py.git",
+      "commit": "1b8436779832be326f24bd2acd40a908e9f54685",
+      "purpose": "Grid kinematics, smoothing, and mesoanalysis reference"
     }
   ]
 }
