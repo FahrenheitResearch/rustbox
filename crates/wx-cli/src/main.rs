@@ -41,7 +41,7 @@ fn print_status() {
     );
     println!("wx-thermo: real sharprs-derived SBCAPE/MLCAPE/MUCAPE/CIN diagnostics");
     println!(
-        "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs winds.rs port"
+        "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs compatibility fork"
     );
     println!("wx-render: real transparent PNG overlay writer");
     println!("wx-cuda: stub capability surface only");

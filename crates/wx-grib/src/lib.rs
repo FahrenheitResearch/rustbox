@@ -7,7 +7,7 @@ use std::path::Path;
 use wx_fetch::{SubsetMessageRef, SubsetPlan};
 use wx_types::{
     CoordinateMetadata, Field2D, FieldMetadata, GridSpec, LevelMetadata, ProjectionKind,
-    SoundingLevel, SoundingProfile, ValidTimeMetadata,
+    RunMetadata, SoundingLevel, SoundingProfile, ValidTimeMetadata,
 };
 
 const MS_TO_KTS: f64 = 1.943_844_492_440_604_6;
@@ -132,10 +132,27 @@ fn decode_message_bytes(
 
     let file = Grib2File::from_bytes(&bytes[start..end])
         .context("failed to parse selected GRIB2 bytes")?;
+    if file.messages.len() != 1 {
+        bail!(
+            "expected exactly one GRIB2 message in selected byte range {}..{}, found {}",
+            selection.start,
+            selection.end_exclusive,
+            file.messages.len()
+        );
+    }
     let message = file
         .messages
         .first()
         .context("selected GRIB2 bytes did not contain any messages")?;
+    let reference_time = utc_from_naive(message.reference_time);
+    let forecast_duration = forecast_duration(
+        message.product.forecast_time,
+        message.product.time_range_unit,
+    )?;
+    let valid_time = reference_time + forecast_duration;
+    let forecast_hour =
+        forecast_hour_from_duration(forecast_duration, message.product.time_range_unit)?;
+    validate_plan_matches_message(plan, selection, reference_time, forecast_hour, valid_time)?;
     let decoded = unpack_message_normalized(message).context("failed to unpack GRIB2 message")?;
 
     let values: Vec<f32> = decoded.iter().map(|value| *value as f32).collect();
@@ -197,14 +214,13 @@ fn decode_message_bytes(
                 units: level_units(message.product.level_type).to_string(),
             },
             source: plan.source.clone(),
-            run: plan.run.clone(),
+            run: RunMetadata {
+                cycle: reference_time,
+                forecast_hour,
+            },
             valid: ValidTimeMetadata {
-                reference_time: utc_from_naive(message.reference_time),
-                valid_time: compute_valid_time(
-                    utc_from_naive(message.reference_time),
-                    message.product.forecast_time,
-                    message.product.time_range_unit,
-                ),
+                reference_time,
+                valid_time,
             },
         },
         grid,
@@ -452,18 +468,67 @@ fn utc_from_naive(value: chrono::NaiveDateTime) -> DateTime<Utc> {
     Utc.from_utc_datetime(&value)
 }
 
-fn compute_valid_time(
-    reference_time: DateTime<Utc>,
-    forecast_time: u32,
-    unit: u8,
-) -> DateTime<Utc> {
-    let duration = match unit {
-        0 => Duration::minutes(i64::from(forecast_time)),
-        1 => Duration::hours(i64::from(forecast_time)),
-        2 => Duration::days(i64::from(forecast_time)),
-        _ => Duration::zero(),
-    };
-    reference_time + duration
+fn forecast_duration(forecast_time: u32, unit: u8) -> Result<Duration> {
+    match unit {
+        0 => Ok(Duration::minutes(i64::from(forecast_time))),
+        1 => Ok(Duration::hours(i64::from(forecast_time))),
+        2 => Ok(Duration::days(i64::from(forecast_time))),
+        _ => bail!("unsupported GRIB time range unit {}", unit),
+    }
+}
+
+fn forecast_hour_from_duration(duration: Duration, original_unit: u8) -> Result<u16> {
+    let minutes = duration.num_minutes();
+    if minutes % 60 != 0 {
+        bail!(
+            "GRIB time range unit {} produced a non-hour-aligned forecast duration of {} minutes",
+            original_unit,
+            minutes
+        );
+    }
+
+    u16::try_from(minutes / 60).context("forecast duration overflowed rustbox forecast-hour range")
+}
+
+fn validate_plan_matches_message(
+    plan: &SubsetPlan,
+    selection: &SubsetMessageRef,
+    message_reference_time: DateTime<Utc>,
+    message_forecast_hour: u16,
+    message_valid_time: DateTime<Utc>,
+) -> Result<()> {
+    if plan.run.cycle != message_reference_time {
+        bail!(
+            "subset plan cycle {} does not match decoded message reference time {} for {} {}",
+            plan.run.cycle,
+            message_reference_time,
+            selection.variable,
+            selection.level
+        );
+    }
+
+    if plan.run.forecast_hour != message_forecast_hour {
+        bail!(
+            "subset plan forecast hour {} does not match decoded message forecast hour {} for {} {}",
+            plan.run.forecast_hour,
+            message_forecast_hour,
+            selection.variable,
+            selection.level
+        );
+    }
+
+    let plan_valid_time = plan.run.cycle + Duration::hours(i64::from(plan.run.forecast_hour));
+    if plan_valid_time != message_valid_time {
+        bail!(
+            "subset plan valid time {} does not match decoded message valid time {} for {} {}",
+            plan_valid_time,
+            message_valid_time,
+            selection.variable,
+            selection.level
+        );
+    }
+
+    Ok(())
 }
 
 fn level_units(level_type: u8) -> &'static str {
@@ -642,6 +707,117 @@ mod tests {
         assert_eq!(
             decoded[2].field.values.len(),
             decoded[2].field.expected_len()
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_ranges_with_multiple_messages() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        plan.selections[0].end_exclusive =
+            std::fs::metadata(fixture_path("hrrr_gust_surface_fragment.grib2"))
+                .expect("fixture should exist")
+                .len();
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("over-wide selection should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("expected exactly one GRIB2 message"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_cycle_mismatch_between_plan_and_message() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        plan.run.cycle = cycle + Duration::hours(1);
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("cycle mismatch should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match decoded message reference time"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decode_fragment_rejects_forecast_hour_mismatch_between_plan_and_message() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let mut plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        plan.run.forecast_hour = 1;
+
+        let error =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect_err("forecast mismatch should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("does not match decoded message forecast hour"),
+            "unexpected error: {error}"
         );
     }
 
@@ -832,6 +1008,18 @@ mod tests {
             (severe.kinematics.bulk_shear_06km_ms - model_fixture.expected.bulk_shear_06km_ms)
                 .abs()
                 < 0.01
+        );
+    }
+
+    #[test]
+    fn forecast_duration_rejects_unsupported_grib_time_units() {
+        let error = forecast_duration(1, 13).expect_err("unsupported unit should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported GRIB time range unit"),
+            "unexpected error: {error}"
         );
     }
 }

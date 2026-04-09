@@ -164,6 +164,15 @@ fn plan_hrrr_subset_with_context(
             )),
         }?;
 
+        if entry.reference_time != request.cycle {
+            bail!(
+                "idx entry {} reference time {} does not match requested cycle {}",
+                selector_label(wanted),
+                entry.reference_time,
+                request.cycle
+            );
+        }
+
         let end_exclusive = entries
             .get(entry_index + 1)
             .map(|next| next.byte_offset)
@@ -367,6 +376,36 @@ mod tests {
 
         assert!(
             error.to_string().contains("matched multiple idx entries"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn plan_hrrr_subset_rejects_idx_cycle_mismatches() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 2, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+
+        let error = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect_err("cycle mismatch should fail");
+
+        assert!(
+            error.to_string().contains("does not match requested cycle"),
             "unexpected error: {error}"
         );
     }

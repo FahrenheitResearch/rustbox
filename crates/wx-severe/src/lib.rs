@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use sharprs::Profile as SharpProfile;
 use sharprs::params::composites::stp_fixed;
 use wx_thermo::{ParcelDiagnostics, to_sharprs_profile};
@@ -29,7 +29,8 @@ pub fn compute_significant_tornado_parameter(
     let sharp_profile = to_sharprs_profile(profile)?;
     // The pinned sharprs::winds::helicity call path still fails on the checked-in
     // fixture profiles, so rustbox keeps an exact-layer local port of the winds.rs
-    // algorithms until that upstream behavior is reconciled.
+    // algorithms plus a narrow interpolation fallback until that upstream
+    // behavior is reconciled.
     let ((storm_u, storm_v), _, _) = calc_bunkers(&sharp_profile)?;
     let srh_01km = calc_helicity_exact(&sharp_profile, 0.0, 1_000.0, storm_u, storm_v)?;
     let srh_03km = calc_helicity_exact(&sharp_profile, 0.0, 3_000.0, storm_u, storm_v)?;
@@ -43,7 +44,7 @@ pub fn compute_significant_tornado_parameter(
             srh_01km,
             bulk_shear_06km_ms,
         )
-        .unwrap_or(0.0),
+        .context("stp_fixed returned no value for the computed parcel and kinematic inputs")?,
         kinematics: KinematicDiagnostics {
             srh_01km_m2s2: srh_01km,
             srh_03km_m2s2: srh_03km,
@@ -253,6 +254,68 @@ mod tests {
             .join(name)
     }
 
+    fn dense_parity_profile() -> SoundingProfile {
+        let pressures = [
+            1000.0, 950.0, 900.0, 850.0, 800.0, 750.0, 700.0, 650.0, 600.0, 550.0, 500.0, 450.0,
+            400.0, 350.0, 300.0, 250.0, 200.0,
+        ];
+        let heights = [
+            100.0, 540.0, 1000.0, 1480.0, 1980.0, 2500.0, 3050.0, 3620.0, 4220.0, 4860.0, 5540.0,
+            6280.0, 7100.0, 8000.0, 9100.0, 10400.0, 11800.0,
+        ];
+        let temperatures = [
+            30.0, 25.0, 20.0, 16.0, 12.0, 8.0, 4.0, 0.0, -5.0, -10.0, -16.0, -22.0, -30.0, -38.0,
+            -45.0, -55.0, -60.0,
+        ];
+        let dewpoints = [
+            22.0, 18.0, 12.0, 8.0, 3.0, -2.0, -8.0, -14.0, -20.0, -26.0, -32.0, -38.0, -44.0,
+            -50.0, -55.0, -60.0, -65.0,
+        ];
+        let directions = [
+            180.0, 190.0, 210.0, 230.0, 240.0, 250.0, 260.0, 265.0, 270.0, 275.0, 280.0, 285.0,
+            290.0, 290.0, 285.0, 280.0, 275.0,
+        ];
+        let speeds = [
+            10.0, 15.0, 22.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 78.0,
+            80.0, 75.0, 65.0,
+        ];
+
+        SoundingProfile {
+            station_id: "dense-parity".to_string(),
+            latitude: None,
+            longitude: None,
+            grid_x: None,
+            grid_y: None,
+            valid_time: None,
+            levels: pressures
+                .iter()
+                .zip(heights.iter())
+                .zip(temperatures.iter())
+                .zip(dewpoints.iter())
+                .zip(directions.iter())
+                .zip(speeds.iter())
+                .map(
+                    |(
+                        (
+                            (((pressure_hpa, height_m), temperature_c), dewpoint_c),
+                            wind_direction_deg,
+                        ),
+                        wind_speed_kts,
+                    )| {
+                        wx_types::SoundingLevel {
+                            pressure_hpa: *pressure_hpa,
+                            height_m: *height_m,
+                            temperature_c: *temperature_c,
+                            dewpoint_c: *dewpoint_c,
+                            wind_direction_deg: *wind_direction_deg,
+                            wind_speed_kts: *wind_speed_kts,
+                        }
+                    },
+                )
+                .collect(),
+        }
+    }
+
     #[test]
     fn stp_matches_reference_supercell_environment() {
         let fixture: SoundingFixture = serde_json::from_str(
@@ -276,14 +339,66 @@ mod tests {
             .expect("severe diagnostics should work");
 
         assert!(
-            (severe.significant_tornado_parameter - fixture.expected.stp_fixed).abs() < 0.5,
+            (severe.significant_tornado_parameter - fixture.expected.stp_fixed).abs() < 0.05,
             "STP mismatch"
         );
-        assert!((srh_01km - fixture.expected.srh_01km_m2s2).abs() < 10.0);
-        assert!((srh_03km - fixture.expected.srh_03km_m2s2).abs() < 15.0);
-        assert!((bulk_shear_06km_ms - fixture.expected.bulk_shear_06km_ms).abs() < 1.0);
+        assert!((srh_01km - fixture.expected.srh_01km_m2s2).abs() < 0.5);
+        assert!((srh_03km - fixture.expected.srh_03km_m2s2).abs() < 0.5);
+        assert!((bulk_shear_06km_ms - fixture.expected.bulk_shear_06km_ms).abs() < 0.05);
         assert!(severe.kinematics.srh_01km_m2s2 > 100.0);
         assert!(severe.kinematics.bulk_shear_06km_ms > 20.0);
+    }
+
+    #[test]
+    fn local_kinematics_match_upstream_winds_on_dense_profile() {
+        let profile = dense_parity_profile();
+        let sharp_profile =
+            to_sharprs_profile(&profile).expect("sharprs profile conversion should work");
+
+        let ((local_ru, local_rv), _, _) =
+            calc_bunkers(&sharp_profile).expect("local bunkers should work");
+        let local_shr06 =
+            calc_bulk_shear(&sharp_profile, 0.0, 6_000.0).expect("local shear should work");
+
+        let (upstream_ru, upstream_rv, _, _) =
+            winds::non_parcel_bunkers_motion(&sharp_profile).expect("upstream bunkers should work");
+        let (upstream_srh1, _, _) = winds::helicity(
+            &sharp_profile,
+            0.0,
+            1_000.0,
+            upstream_ru,
+            upstream_rv,
+            -1.0,
+            true,
+        )
+        .expect("upstream helicity should work");
+        let (upstream_srh3, _, _) = winds::helicity(
+            &sharp_profile,
+            0.0,
+            3_000.0,
+            upstream_ru,
+            upstream_rv,
+            -1.0,
+            true,
+        )
+        .expect("upstream helicity should work");
+        let p6km = sharp_profile.pres_at_height(sharp_profile.to_msl(6_000.0));
+        let (upstream_shr_u, upstream_shr_v) =
+            winds::wind_shear(&sharp_profile, sharp_profile.sfc_pressure(), p6km)
+                .expect("upstream shear should work");
+        let upstream_shr06 = upstream_shr_u.hypot(upstream_shr_v);
+        let local_srh1 =
+            calc_helicity_exact(&sharp_profile, 0.0, 1_000.0, upstream_ru, upstream_rv)
+                .expect("local helicity should work");
+        let local_srh3 =
+            calc_helicity_exact(&sharp_profile, 0.0, 3_000.0, upstream_ru, upstream_rv)
+                .expect("local helicity should work");
+
+        assert!((local_ru - upstream_ru).abs() < 0.1);
+        assert!((local_rv - upstream_rv).abs() < 0.1);
+        assert!((local_srh1 - upstream_srh1).abs() < 0.01);
+        assert!((local_srh3 - upstream_srh3).abs() < 0.01);
+        assert!((local_shr06 - upstream_shr06).abs() < 0.01);
     }
 
     #[test]
@@ -304,6 +419,32 @@ mod tests {
         assert!(
             error.to_string().contains("wind"),
             "unexpected sharprs::winds failure: {error}"
+        );
+    }
+
+    #[test]
+    fn pinned_sharprs_helicity_failure_is_rescued_by_local_endpoint_fallback() {
+        let fixture: SoundingFixture = serde_json::from_str(
+            &std::fs::read_to_string(fixture_path("sounding_supercell.json"))
+                .expect("fixture should be readable"),
+        )
+        .expect("fixture should parse");
+        let sharp_profile =
+            to_sharprs_profile(&fixture.profile).expect("sharprs profile conversion should work");
+        let upstream_surface_pressure = sharp_profile.pres_at_height(sharp_profile.to_msl(0.0));
+        let local_surface_pressure =
+            pressure_at_agl(&sharp_profile, 0.0).expect("pressure should work");
+        let (interp_u, interp_v) = sharp_profile.interp_wind(upstream_surface_pressure);
+        let local = wind_at_pressure(&sharp_profile, local_surface_pressure)
+            .expect("local fallback should recover the endpoint wind");
+
+        assert!(
+            !interp_u.is_finite() || !interp_v.is_finite(),
+            "expected direct surface wind interpolation to be non-finite on the failing fixture"
+        );
+        assert!(
+            local.0.is_finite() && local.1.is_finite(),
+            "expected local fallback to recover the surface wind endpoint"
         );
     }
 }
