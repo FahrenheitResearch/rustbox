@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-wx-types = { path = "../wx-types" }
-
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+byteorder = "1.5"
+bzip2 = { version = "0.5", default-features = false, features = ["libbz2-rs-sys"] }
+flate2 = "1.1"

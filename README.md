@@ -58,16 +58,18 @@ rustbox/
 - `wx-severe` computes fixed-layer STP plus exact-layer kinematics from a local compatibility fork of the pinned `sharprs` `winds.rs` logic, including a narrow endpoint-wind fallback where the direct upstream helicity path still fails on the checked-in fixture profile.
 - `wx-render` writes a real transparent PNG overlay from a decoded scalar field.
 - `wx-zarr` now writes and reads real per-cycle Zarr v2 directory stores for decoded `FieldBundle` outputs, including 2D/3D arrays, coordinate arrays, root attrs, archive-store descriptors, and bundle round-tripping.
+- `wx-radar` now provides a real rustdar-backed NEXRAD Level II surface: volume parsing, product inventory, derived products, detection summaries, and radar rendering.
 - `cargo run -p wx-cli -- demo` now uses one coherent HRRR-based path from checked-in fixtures.
 - `cargo run -p wx-cli -- plan ...`, `download ...`, `decode ...`, `archive-run ...`, and `resume ...` now provide a real archive-facing HRRR core for planning, staging, decoding, and persisting remote subset jobs.
 - `cargo run -p mesoanalysis-app -- demo` now decodes the checked-in HRRR 850 mb pressure fixture, computes a real 850 mb product bundle, writes derived Zarr output, and renders four diagnostic PNGs.
 - `cargo run -p mesoanalysis-app -- run <archive_manifest.json> <output_root> [product...]` now consumes persisted archive-cycle Zarr stores and generates real per-cycle mesoanalysis Zarr + PNG outputs for 850 mb smoothed vorticity, divergence, temperature advection, and theta frontogenesis.
+- `cargo run -p radar-viewer-app -- inspect <level2_file>`, `render ...`, and `detect ...` now provide a thin real CLI over the local radar core for offline Level II inspection, PNG export, and signature summaries.
 
 ## What Is Still Stubbed
 
 - `wx-cuda` remains a capability stub only.
-- `wx-radar`, `wx-wrf`, and `wx-py` are not part of the implemented science surface yet.
-- `radar-viewer` and `open-wx-api-rs` are still scaffold apps.
+- `wx-wrf` and `wx-py` are not part of the implemented science surface yet.
+- `open-wx-api-rs` is still a scaffold app.
 - Python compatibility packaging is not implemented.
 - The archive core now persists per-cycle Zarr stores, but multi-cycle append/partition semantics and richer archive-wide store conventions are still early.
 - `rustbox` still depends on pinned upstream `grib-core` and `sharprs` crates rather than fully owning those cores locally.

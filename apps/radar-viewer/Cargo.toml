@@ -5,5 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+image.workspace = true
+serde_json.workspace = true
 wx-radar = { path = "../../crates/wx-radar" }
-

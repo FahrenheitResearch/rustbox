@@ -170,6 +170,42 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - richer CF/grid-mapping conventions for projected model grids
   - remote/object-store backends
 
+## wx-radar
+
+- Upstream repo: `rustdar`
+- Commit: `3a708877b3f7bb5a93e0d14a95df36a3e0ada698`
+- Source files:
+  - `upstream/rustdar/crates/rustdar-core/src/level2.rs`
+  - `upstream/rustdar/crates/rustdar-core/src/products.rs`
+  - `upstream/rustdar/crates/rustdar-core/src/sites.rs`
+  - `upstream/rustdar/crates/rustdar-core/src/color_table.rs`
+  - `upstream/rustdar/crates/rustdar-core/src/render.rs`
+  - `upstream/rustdar/src/nexrad/derived.rs`
+  - `upstream/rustdar/src/nexrad/srv.rs`
+  - `upstream/rustdar/src/nexrad/detection.rs`
+- Adapted into:
+  - [crates/wx-radar/src/lib.rs](../crates/wx-radar/src/lib.rs)
+  - [crates/wx-radar/src/nexrad/mod.rs](../crates/wx-radar/src/nexrad/mod.rs)
+  - [crates/wx-radar/src/nexrad/level2.rs](../crates/wx-radar/src/nexrad/level2.rs)
+  - [crates/wx-radar/src/nexrad/products.rs](../crates/wx-radar/src/nexrad/products.rs)
+  - [crates/wx-radar/src/nexrad/sites.rs](../crates/wx-radar/src/nexrad/sites.rs)
+  - [crates/wx-radar/src/nexrad/color_table.rs](../crates/wx-radar/src/nexrad/color_table.rs)
+  - [crates/wx-radar/src/nexrad/render.rs](../crates/wx-radar/src/nexrad/render.rs)
+  - [crates/wx-radar/src/nexrad/derived.rs](../crates/wx-radar/src/nexrad/derived.rs)
+  - [crates/wx-radar/src/nexrad/srv.rs](../crates/wx-radar/src/nexrad/srv.rs)
+  - [crates/wx-radar/src/nexrad/detection.rs](../crates/wx-radar/src/nexrad/detection.rs)
+- What was adapted:
+  - Level II archive-volume parsing and product inventory
+  - radar-site catalog and nearest-site helpers
+  - palette tables plus classic/smooth radar sweep rendering
+  - derived VIL, echo tops, and storm-relative velocity
+  - rotation, TVS, and hail detection summaries
+  - a thin public API over the imported radar core for file reads, summaries, rendering, and detection
+- What was intentionally left out:
+  - live radar download/orchestration inside `wx-radar`
+  - interactive WGPU viewer integration
+  - storm tracking/alerting assimilation beyond the current detection summary surface
+
 ## mesoanalysis app
 
 - Upstream repo: `metrust-py`
@@ -189,6 +225,21 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - the full upstream hrrr-mesoanalysis 46-parameter orchestration
   - obs/QC/Barnes assimilation
   - projection-aware render products beyond the current PNG overlays
+
+## radar-viewer app
+
+- Upstream repo: `rustdar`
+- Commit: `3a708877b3f7bb5a93e0d14a95df36a3e0ada698`
+- Source files:
+  - `upstream/rustdar/src/bin/radar_render.rs`
+- Adapted into:
+  - [apps/radar-viewer/src/main.rs](../apps/radar-viewer/src/main.rs)
+- What was adapted:
+  - thin file-oriented inspect/render/detect CLI shape over the local radar core
+  - product parsing, render-mode selection, and PNG export flow
+- What was intentionally left out:
+  - live NEXRAD S3 download flow
+  - map overlays and richer UI surface
 
 ## Fixtures
 
@@ -215,6 +266,13 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - `cargo run -p wx-cli -- archive-run 2024040100 2024040100 prs 0 target/meso-batch-smoke "HGT|850 mb|anl" "TMP|850 mb|anl" "UGRD|850 mb|anl" "VGRD|850 mb|anl"`
   - `cargo run -p mesoanalysis-app -- run target/meso-batch-smoke/archive_manifest.json target/meso-products-smoke all`
   - stages a real remote HRRR subset, persists the base per-cycle store, then writes a derived per-cycle mesoanalysis Zarr store plus PNG outputs
+- Radar fixture source:
+  - `https://unidata-nexrad-level2.s3.amazonaws.com/2024/01/01/KATX/KATX20240101_000258_V06`
+  - trimmed into [tests/fixtures/KATX20240101_000258_partial_V06](../tests/fixtures/KATX20240101_000258_partial_V06) to keep offline radar tests fast while preserving a real Level II volume
+- Radar smoke-test path:
+  - `cargo run -p radar-viewer-app -- inspect tests/fixtures/KATX20240101_000258_partial_V06`
+  - `cargo run -p radar-viewer-app -- render tests/fixtures/KATX20240101_000258_partial_V06 REF target/demo/radar_reflectivity.png 0 512 classic default`
+  - `cargo run -p radar-viewer-app -- detect tests/fixtures/KATX20240101_000258_partial_V06`
 - Legacy single-field render fixture:
   - [tests/fixtures/hrrr_gust_surface_fragment.grib2](../tests/fixtures/hrrr_gust_surface_fragment.grib2)
   - [tests/fixtures/hrrr_gust_surface_fragment.idx](../tests/fixtures/hrrr_gust_surface_fragment.idx)

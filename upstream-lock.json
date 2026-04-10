@@ -41,6 +41,12 @@
       "url": "https://github.com/FahrenheitResearch/open-mrms.git",
       "commit": "3d08c318e38b09f50734eea3434c08993dbaf499",
       "purpose": "Zarr writer, partitioned store layout, and ingest-to-store reference"
+    },
+    {
+      "name": "rustdar",
+      "url": "https://github.com/FahrenheitResearch/rustdar.git",
+      "commit": "3a708877b3f7bb5a93e0d14a95df36a3e0ada698",
+      "purpose": "NEXRAD Level II parser, derived radar products, detection, and radar rendering reference"
     }
   ]
 }

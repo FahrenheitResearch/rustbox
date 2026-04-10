@@ -63,10 +63,13 @@ fn print_status() {
         "wx-zarr: real per-cycle Zarr v2 directory-store persistence for decoded HRRR bundles"
     );
     println!(
+        "wx-radar: real rustdar-backed Level II parser, derived products, detection, and radar render core"
+    );
+    println!(
         "wx-cli archive-core: plan/download/decode/archive-run/resume over HRRR cycle ranges with persisted stores"
     );
     println!("wx-cuda: stub capability surface only");
-    println!("wx-radar/wx-wrf/wx-py: not implemented in this milestone");
+    println!("wx-wrf/wx-py: not implemented in this milestone");
 }
 
 fn run_demo() -> Result<()> {
