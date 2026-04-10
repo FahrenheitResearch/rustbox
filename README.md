@@ -4,6 +4,8 @@
 
 This workspace is intentionally separate from the upstream repos cloned into `upstream/`. Those repos are the source material for migration work, not the long-term package boundary.
 
+For a quick visual tour of the current implemented surface, open [docs/showcase.md](docs/showcase.md).
+
 ## Current direction
 
 - `rustbox` is the umbrella workspace and local integration point.
