@@ -6,7 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+font8x8.workspace = true
 image.workspace = true
+shapefile.workspace = true
+sharprs.workspace = true
+wx-thermo = { path = "../wx-thermo" }
 wx-types = { path = "../wx-types" }
 
 [dev-dependencies]

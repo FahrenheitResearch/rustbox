@@ -35,6 +35,5 @@ The workspace skeleton is aimed at this first end-to-end path:
 1. Build an HRRR subset request.
 2. Decode a GRIB subset into a canonical field grid.
 3. Compute parcel diagnostics and a severe composite.
-4. Render a transparent overlay product.
+4. Render a projected map product and a sounding product.
 5. Expose the same path through CLI and Python compatibility layers.
-

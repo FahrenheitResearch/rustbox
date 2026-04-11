@@ -5,8 +5,8 @@ This page is the fastest visual tour of what `rustbox` can do today without read
 ## Current End-to-End Surfaces
 
 - HRRR archive/core path: plan -> stage -> decode -> persist
-- HRRR model-column diagnostics: parcel/severe from a decoded model profile
-- HRRR batch mesoanalysis: derived 850 mb products from persisted stores
+- HRRR model-column diagnostics: parcel/severe plus SHARPrs full-sounding render from a decoded model profile
+- HRRR batch mesoanalysis: derived 850 mb products from persisted stores with projected basemap PNG output
 - Radar path: Level II parse -> inspect -> render -> detect
 
 ## 1. HRRR Model-Column Demo
@@ -25,9 +25,10 @@ sbcape=209.1 sbcin=-41.8 mlcape=0.0 mlcin=0.0 mucape=209.1 mucin=-41.8
 srh01=11.4 srh03=47.4 shear06=18.30 stp_fixed=0.01
 ```
 
-Artifact:
+Artifacts:
 
-![HRRR Gust Overlay](assets/showcase/hrrr_gust_surface_overlay.png)
+![HRRR Gust Basemap](assets/showcase/hrrr_gust_surface_basemap.png)
+![HRRR Model Sounding](assets/showcase/hrrr_model_sounding.png)
 
 What this proves:
 
@@ -35,7 +36,8 @@ What this proves:
 - real GRIB2 decode
 - fixed model-column extraction
 - real parcel and severe diagnostics
-- real transparent overlay rendering
+- real projected basemap map rendering
+- real SHARPrs full-sounding PNG rendering over the extracted model column
 
 ## 2. HRRR Batch Mesoanalysis Demo
 
@@ -73,7 +75,7 @@ What this proves:
 - persisted archive-cycle Zarr stores can be read back into `FieldBundle`
 - batch product registry and dependency mapping are real
 - derived products can be persisted back to Zarr
-- the render path supports multiple science products, not just one demo overlay
+- the render path supports multiple projected map products, not just one raw raster overlay
 
 ## 3. Radar Demo
 
@@ -150,6 +152,8 @@ The current showcase is real, but the platform is not fully closed yet.
 - `wx-py` is still a stub
 - `open-wx-api-rs` is still a scaffold
 - mesoanalysis is real but still a narrow first batch engine, not the full 46-parameter upstream surface
+- radar rendering is real but still sweep-centric, not yet composited onto a map basemap
+- map products still do not have contours, barbs, or richer cartographic labeling
 
 ## 6. Fastest Local Tour
 

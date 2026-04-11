@@ -135,19 +135,34 @@ This file tracks the first real vertical slice that replaced the original scaffo
 
 ## wx-render
 
-- Upstream repo: `wrf-rust-plots`
-- Commit: `2088e9599dcf7c7e55be5261c935a48c7afbdd60`
+- Upstream repo: `wrf-rust-plots` and `sharprs`
+- Commit:
+  - `wrf-rust-plots`: `2088e9599dcf7c7e55be5261c935a48c7afbdd60`
+  - `sharprs`: `16cf0757304eb690d0208c304e32a4676178f00a`
 - Source files:
   - `upstream/wrf-rust-plots/crates/wrf-render/src/colormaps.rs`
+  - `upstream/wrf-rust-plots/crates/wrf-render/src/features.rs`
+  - `upstream/wrf-rust-plots/crates/wrf-render/src/projection.rs`
+  - `upstream/sharprs/src/render/compositor.rs`
+  - `upstream/sharprs/src/render/skewt.rs`
+  - `upstream/sharprs/src/render/hodograph.rs`
+  - `upstream/sharprs/src/render/panels.rs`
+  - `upstream/sharprs/src/render/param_table.rs`
 - Adapted into:
   - [crates/wx-render/src/lib.rs](../crates/wx-render/src/lib.rs)
+  - [crates/wx-render/src/map_render.rs](../crates/wx-render/src/map_render.rs)
+  - [crates/wx-render/src/text.rs](../crates/wx-render/src/text.rs)
 - What was adapted:
   - wind palette anchor colors
   - frontogenesis/vorticity diagnostic palettes
   - simple native raster overlay approach
+  - projected basemap-backed map rendering over local `GridSpec` projection metadata
+  - Natural Earth coastline, country-boundary, and state-line feature loading from checked-in assets
+  - SHARPrs full-sounding PNG generation over local `SoundingProfile` conversion
 - What was intentionally left out:
-  - map projection rendering
-  - contours, barbs, labels, and legends
+  - contour and wind-barb overlays on map products
+  - richer map labeling and legends beyond the current title/colorbar surface
+  - radar-to-basemap compositing
 
 ## wx-zarr
 
@@ -266,6 +281,9 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - `cargo run -p wx-cli -- archive-run 2024040100 2024040100 prs 0 target/meso-batch-smoke "HGT|850 mb|anl" "TMP|850 mb|anl" "UGRD|850 mb|anl" "VGRD|850 mb|anl"`
   - `cargo run -p mesoanalysis-app -- run target/meso-batch-smoke/archive_manifest.json target/meso-products-smoke all`
   - stages a real remote HRRR subset, persists the base per-cycle store, then writes a derived per-cycle mesoanalysis Zarr store plus PNG outputs
+- Basemap assets:
+  - checked-in Natural Earth 110m layers under [assets/basemap/natural_earth_110m](../assets/basemap/natural_earth_110m)
+  - sourced from Natural Earth public-domain downloads for coastline, country-boundary, and state/province linework
 - Radar fixture source:
   - `https://unidata-nexrad-level2.s3.amazonaws.com/2024/01/01/KATX/KATX20240101_000258_V06`
   - trimmed into [tests/fixtures/KATX20240101_000258_partial_V06](../tests/fixtures/KATX20240101_000258_partial_V06) to keep offline radar tests fast while preserving a real Level II volume

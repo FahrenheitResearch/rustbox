@@ -9,7 +9,7 @@ use wx_grid::{
     advection_field, divergence_field, field_stats, pressure_level_frontogenesis_field,
     smooth_n_point_field, vorticity_field,
 };
-use wx_render::{OverlaySpec, render_field_to_png};
+use wx_render::{MapOverlaySpec, render_field_to_map_png};
 use wx_types::{ArchiveCycleState, ArchiveRunManifest, Field2D, FieldBundle};
 use wx_zarr::{ZarrWriteConfig, read_field_bundle_from_zarr, write_field_bundle_to_zarr};
 
@@ -373,12 +373,20 @@ fn process_bundle_cycle(
                 )
             })?;
             let png_path = png_root.join(format!("{}.png", product.spec.id));
-            let overlay = render_field_to_png(
+            let overlay = render_field_to_map_png(
                 &product.field,
-                &OverlaySpec {
+                &MapOverlaySpec {
                     palette: product.spec.palette.to_string(),
-                    transparent_background: true,
                     value_range: None,
+                    title: Some(product.spec.description.to_string()),
+                    subtitle: Some(format!(
+                        "{} | {} | valid {}",
+                        bundle.source.model.to_uppercase(),
+                        bundle.run.cycle.format("%Y-%m-%d %HZ"),
+                        bundle.valid.valid_time.format("%Y-%m-%d %HZ")
+                    )),
+                    colorbar_label: Some(product.field.metadata.units.clone()),
+                    markers: Vec::new(),
                 },
                 &png_path,
             )?;

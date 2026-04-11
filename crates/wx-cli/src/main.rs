@@ -11,7 +11,10 @@ use wx_grib::{
     build_hrrr_sounding_profile, decode_field_bundle, decode_selected_messages,
     summarize_field_bundle,
 };
-use wx_render::{OverlaySpec, render_field_to_png};
+use wx_render::{
+    MapMarker, MapOverlaySpec, OverlaySpec, SoundingRenderSpec, render_field_to_map_png,
+    render_field_to_png, render_sounding_to_png,
+};
 use wx_severe::compute_significant_tornado_parameter;
 use wx_thermo::compute_parcel_diagnostics;
 use wx_types::{ArchiveCycleState, ArchiveJobSpec, ArchiveRunManifest, RequestedField};
@@ -58,7 +61,9 @@ fn print_status() {
     println!(
         "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs compatibility fork"
     );
-    println!("wx-render: real transparent PNG overlay writer");
+    println!(
+        "wx-render: real transparent PNG overlay writer, projected basemap map renderer, and SHARPrs full-sounding PNG writer"
+    );
     println!(
         "wx-zarr: real per-cycle Zarr v2 directory-store persistence for decoded HRRR bundles"
     );
@@ -95,15 +100,16 @@ fn run_demo() -> Result<()> {
 
     let surface_messages = decode_selected_messages(&surface_fragment, &surface_plan)?;
     let pressure_messages = decode_selected_messages(&pressure_fragment, &pressure_plan)?;
-    let sounding = build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)?;
-    let parcel = compute_parcel_diagnostics(&sounding)?;
-    let severe = compute_significant_tornado_parameter(&sounding, &parcel)?;
+    let sounding_profile =
+        build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)?;
+    let parcel = compute_parcel_diagnostics(&sounding_profile)?;
+    let severe = compute_significant_tornado_parameter(&sounding_profile, &parcel)?;
     let overlay_field = surface_messages
         .first()
         .map(|message| message.field.clone())
         .context("surface fixture decode did not return the requested gust field")?;
 
-    let output_path = repo_root().join("target/demo/hrrr_gust_surface_overlay.png");
+    let overlay_output_path = repo_root().join("target/demo/hrrr_gust_surface_overlay.png");
     let overlay = render_field_to_png(
         &overlay_field,
         &OverlaySpec {
@@ -111,7 +117,44 @@ fn run_demo() -> Result<()> {
             transparent_background: true,
             value_range: None,
         },
-        &output_path,
+        &overlay_output_path,
+    )?;
+    let map_output_path = repo_root().join("target/demo/hrrr_gust_surface_basemap.png");
+    let map_overlay = render_field_to_map_png(
+        &overlay_field,
+        &MapOverlaySpec {
+            palette: "winds".to_string(),
+            value_range: None,
+            title: Some("HRRR Surface Gust".to_string()),
+            subtitle: Some(format!(
+                "{} | f{:02} | extracted sounding at x{} y{}",
+                overlay_field
+                    .metadata
+                    .valid
+                    .valid_time
+                    .format("%Y-%m-%d %HZ"),
+                overlay_field.metadata.run.forecast_hour,
+                x,
+                y
+            )),
+            colorbar_label: Some(format!(
+                "{} ({})",
+                overlay_field.metadata.short_name, overlay_field.metadata.units
+            )),
+            markers: vec![MapMarker {
+                grid_x: x,
+                grid_y: y,
+                label: Some("model column".to_string()),
+            }],
+        },
+        &map_output_path,
+    )?;
+    let sounding_output_path = repo_root().join("target/demo/hrrr_model_sounding.png");
+    let sounding_png = render_sounding_to_png(
+        &sounding_profile,
+        &SoundingRenderSpec {
+            output_path: sounding_output_path,
+        },
     )?;
 
     let selection = &surface_plan.selections[0];
@@ -141,13 +184,13 @@ fn run_demo() -> Result<()> {
         "profile_point=x{} y{} levels={} sfc_p={:.1} top_p={:.1}",
         x,
         y,
-        sounding.levels.len(),
-        sounding
+        sounding_profile.levels.len(),
+        sounding_profile
             .levels
             .first()
             .map(|level| level.pressure_hpa)
             .unwrap_or(0.0),
-        sounding
+        sounding_profile
             .levels
             .last()
             .map(|level| level.pressure_hpa)
@@ -170,6 +213,8 @@ fn run_demo() -> Result<()> {
         severe.significant_tornado_parameter
     );
     println!("overlay_png={}", overlay.output_path.display());
+    println!("basemap_png={}", map_overlay.output_path.display());
+    println!("sounding_png={}", sounding_png.output_path.display());
     Ok(())
 }
 
