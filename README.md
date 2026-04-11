@@ -54,11 +54,11 @@ rustbox/
 - `wx-fetch` can parse fixture-backed HRRR `.idx` manifests, distinguish source-object URLs from rebased fixture-fragment byte ranges, and error on ambiguous var/level selectors.
 - `wx-grib` can decode real GRIB2 fixture fragments, including multi-message surface and pressure-level paths, and now fails if a selected slice contains anything other than exactly one GRIB2 message.
 - `wx-grib` can decode staged HRRR subset files into real `FieldBundle` summaries and stack repeated pressure levels into `Field3D` volumes.
-- `wx-grib` can extract one fixed HRRR model column into `wx-types::SoundingProfile`, with bundle-consistency checks across the decoded fields.
+- `wx-grib` can extract one fixed HRRR model column into `wx-types::SoundingProfile`, with bundle-consistency checks across the decoded fields and an optional lake-interpolation seam for 2 m thermo when a decoded land/sea mask is available.
 - `wx-thermo` computes real `sharprs`-derived SBCAPE, MLCAPE, MUCAPE, and CIN.
 - `wx-grid` computes real constant-spacing finite-difference divergence, vorticity, advection, pressure-level theta frontogenesis, and MetPy-style 5/9-point smoothing from `Field2D` inputs.
 - `wx-severe` computes fixed-layer STP plus exact-layer kinematics from a local compatibility fork of the pinned `sharprs` `winds.rs` logic, including a narrow endpoint-wind fallback where the direct upstream helicity path still fails on the checked-in fixture profile.
-- `wx-render` writes real PNG products from decoded scalar fields, including raw transparent overlays, projected basemap-backed map renders, and SHARPrs full-sounding analysis PNGs.
+- `wx-render` writes real PNG products from decoded scalar fields, including raw transparent overlays, projected basemap-backed map renders, SHARPrs full-sounding analysis PNGs, anti-aliased TTF text rendering, and product-aware leveled colormaps adapted from `wrf-rust-plots`.
 - `wx-zarr` now writes and reads real per-cycle Zarr v2 directory stores for decoded `FieldBundle` outputs, including 2D/3D arrays, coordinate arrays, root attrs, archive-store descriptors, and bundle round-tripping.
 - `wx-radar` now provides a real rustdar-backed NEXRAD Level II surface: volume parsing, product inventory, derived products, detection summaries, and radar rendering.
 - `cargo run -p wx-cli -- demo` now uses one coherent HRRR-based path from checked-in fixtures and emits a raw gust overlay, a basemap-backed gust map, and a SHARPrs full-sounding PNG from the extracted model column.

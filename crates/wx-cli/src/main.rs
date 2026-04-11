@@ -8,8 +8,8 @@ use wx_fetch::{
     stage_remote_subset_download, stage_subset_file_name,
 };
 use wx_grib::{
-    build_hrrr_sounding_profile, decode_field_bundle, decode_selected_messages,
-    summarize_field_bundle,
+    SurfaceCorrectionOptions, build_hrrr_sounding_profile_with_options, decode_field_bundle,
+    decode_selected_messages, summarize_field_bundle,
 };
 use wx_render::{
     MapMarker, MapOverlaySpec, OverlaySpec, SoundingRenderSpec, render_field_to_map_png,
@@ -62,7 +62,7 @@ fn print_status() {
         "wx-severe: real fixed-layer STP and exact-layer kinematics via a local sharprs compatibility fork"
     );
     println!(
-        "wx-render: real transparent PNG overlay writer, projected basemap map renderer, and SHARPrs full-sounding PNG writer"
+        "wx-render: real transparent PNG overlays, projected basemap map renders, SHARPrs sounding PNGs, and wrf-rust-plots-style antialiased text/leveled colormaps"
     );
     println!(
         "wx-zarr: real per-cycle Zarr v2 directory-store persistence for decoded HRRR bundles"
@@ -100,8 +100,15 @@ fn run_demo() -> Result<()> {
 
     let surface_messages = decode_selected_messages(&surface_fragment, &surface_plan)?;
     let pressure_messages = decode_selected_messages(&pressure_fragment, &pressure_plan)?;
-    let sounding_profile =
-        build_hrrr_sounding_profile(&surface_messages, &pressure_messages, x, y)?;
+    let sounding_profile = build_hrrr_sounding_profile_with_options(
+        &surface_messages,
+        &pressure_messages,
+        x,
+        y,
+        &SurfaceCorrectionOptions {
+            lake_interp_radius_gridpoints: Some(8),
+        },
+    )?;
     let parcel = compute_parcel_diagnostics(&sounding_profile)?;
     let severe = compute_significant_tornado_parameter(&sounding_profile, &parcel)?;
     let overlay_field = surface_messages

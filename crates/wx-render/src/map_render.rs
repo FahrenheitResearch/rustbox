@@ -1,5 +1,6 @@
+use crate::style::{RenderStyle, format_tick, resolve_render_style};
 use crate::text::{draw_text, draw_text_centered, draw_text_right, text_width};
-use crate::{MapMarker, MapOverlaySpec, RenderedOverlay, color_for_value, palette_by_name};
+use crate::{MapMarker, MapOverlaySpec, RenderedOverlay};
 use anyhow::{Context, Result, bail};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use shapefile::{Shape, ShapeReader};
@@ -46,7 +47,6 @@ struct PlotLayout {
 struct ValueScale {
     min: f32,
     max: f32,
-    span: f32,
 }
 
 pub fn render_field_to_map_png(
@@ -63,13 +63,8 @@ pub fn render_field_to_map_png(
     let scale = ValueScale {
         min: value_min,
         max: value_max,
-        span: if (value_max - value_min).abs() < f32::EPSILON {
-            1.0
-        } else {
-            value_max - value_min
-        },
     };
-    let palette = palette_by_name(&spec.palette)?;
+    let style = resolve_render_style(&spec.palette, spec.value_range)?;
     let layout = PlotLayout {
         x: OUTER_PAD,
         y: OUTER_PAD + TITLE_HEIGHT,
@@ -88,7 +83,7 @@ pub fn render_field_to_map_png(
         MAP_BG,
     );
 
-    rasterize_field(&mut image, field, &model_grid, &palette, scale, layout);
+    rasterize_field(&mut image, field, &model_grid, &style, layout);
     draw_graticule(&mut image, &model_grid.geo_extent, layout);
     draw_basemap_features(&mut image, &model_grid.geo_extent, layout);
     draw_marker_overlays(&mut image, &model_grid, &spec.markers, layout);
@@ -104,8 +99,7 @@ pub fn render_field_to_map_png(
     draw_titles(&mut image, field, spec, scale, layout);
     draw_colorbar(
         &mut image,
-        &palette,
-        scale,
+        &style,
         spec,
         PlotLayout {
             x: layout.x + layout.width + COLORBAR_GAP,
@@ -127,7 +121,7 @@ pub fn render_field_to_map_png(
         output_path: output_path.to_path_buf(),
         width: image.width(),
         height: image.height(),
-        palette: spec.palette.clone(),
+        palette: style.id,
         value_min,
         value_max,
     })
@@ -149,8 +143,7 @@ fn rasterize_field(
     image: &mut RgbaImage,
     field: &Field2D,
     model_grid: &ModelGrid,
-    palette: &[Rgba<u8>],
-    scale: ValueScale,
+    style: &RenderStyle,
     layout: PlotLayout,
 ) {
     for py in 0..layout.height {
@@ -175,9 +168,11 @@ fn rasterize_field(
                 continue;
             }
 
-            let normalized = ((value - scale.min) / scale.span).clamp(0.0, 1.0);
-            let mut color = color_for_value(palette, normalized);
-            color.0[3] = 228;
+            let mut color = style.color_for_value(value as f64);
+            if color.0[3] == 0 {
+                continue;
+            }
+            color.0[3] = 232;
             blend_pixel(image, (layout.x + px) as i32, (layout.y + py) as i32, color);
         }
     }
@@ -203,10 +198,10 @@ fn draw_titles(
             field.metadata.units
         )
     });
-    draw_text(
+    draw_text_centered(
         image,
         title,
-        layout.x as i32,
+        (layout.x + layout.width / 2) as i32,
         (layout.y - TITLE_HEIGHT + 6) as i32,
         TITLE_TEXT,
         2,
@@ -237,14 +232,19 @@ fn draw_titles(
 
 fn draw_colorbar(
     image: &mut RgbaImage,
-    palette: &[Rgba<u8>],
-    scale: ValueScale,
+    style: &RenderStyle,
     spec: &MapOverlaySpec,
     layout: PlotLayout,
 ) {
+    let Some((range_min, range_max)) = style.colormap.range() else {
+        return;
+    };
+    let ticks = style.tick_values();
+
     for offset in 0..layout.height {
-        let normalized = 1.0 - offset as f32 / (layout.height.max(1) - 1).max(1) as f32;
-        let color = color_for_value(palette, normalized);
+        let normalized = 1.0 - offset as f64 / (layout.height.max(1) - 1).max(1) as f64;
+        let value = range_min + (range_max - range_min) * normalized;
+        let color = style.color_for_value(value);
         for dx in 0..layout.width {
             image.put_pixel(layout.x + dx, layout.y + offset, color);
         }
@@ -272,14 +272,10 @@ fn draw_colorbar(
         1,
     );
 
-    for (tick, value) in [
-        (0.0, scale.max),
-        (0.25, scale.min + (scale.max - scale.min) * 0.75),
-        (0.5, scale.min + (scale.max - scale.min) * 0.5),
-        (0.75, scale.min + (scale.max - scale.min) * 0.25),
-        (1.0, scale.min),
-    ] {
-        let ty = layout.y as f64 + tick * (layout.height.saturating_sub(1)) as f64;
+    for value in ticks {
+        let ty = layout.y as f64
+            + (1.0 - ((value - range_min) / (range_max - range_min).max(f64::EPSILON)))
+                * (layout.height.saturating_sub(1)) as f64;
         draw_line(
             image,
             layout.x as f64 + layout.width as f64 + 4.0,
@@ -291,7 +287,7 @@ fn draw_colorbar(
         );
         draw_text(
             image,
-            &format!("{value:.2}"),
+            &format_tick(value),
             (layout.x + layout.width + 16) as i32,
             ty.round() as i32 - 4,
             SUBTITLE_TEXT,

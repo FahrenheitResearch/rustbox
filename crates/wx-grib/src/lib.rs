@@ -19,6 +19,11 @@ const REQUIRED_PRESSURE_LEVELS: [&str; 7] = [
     "1000 mb", "925 mb", "850 mb", "700 mb", "500 mb", "400 mb", "300 mb",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SurfaceCorrectionOptions {
+    pub lake_interp_radius_gridpoints: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedMessage {
     pub selection: SubsetMessageRef,
@@ -171,7 +176,15 @@ fn find_valid_hrrr_profile_point(
 
     for y in (0..reference_field.grid.ny).rev() {
         for x in (0..reference_field.grid.nx).rev() {
-            if column_levels(surface_messages, pressure_messages, x, y).is_ok() {
+            if column_levels(
+                surface_messages,
+                pressure_messages,
+                x,
+                y,
+                &SurfaceCorrectionOptions::default(),
+            )
+            .is_ok()
+            {
                 return Ok((x, y));
             }
         }
@@ -186,11 +199,27 @@ pub fn build_hrrr_sounding_profile(
     x: usize,
     y: usize,
 ) -> Result<SoundingProfile> {
+    build_hrrr_sounding_profile_with_options(
+        surface_messages,
+        pressure_messages,
+        x,
+        y,
+        &SurfaceCorrectionOptions::default(),
+    )
+}
+
+pub fn build_hrrr_sounding_profile_with_options(
+    surface_messages: &[DecodedMessage],
+    pressure_messages: &[DecodedMessage],
+    x: usize,
+    y: usize,
+    options: &SurfaceCorrectionOptions,
+) -> Result<SoundingProfile> {
     validate_bundle(surface_messages, "surface")?;
     validate_bundle(pressure_messages, "pressure")?;
     validate_compatible_bundles(surface_messages, pressure_messages)?;
 
-    let levels = column_levels(surface_messages, pressure_messages, x, y)?;
+    let levels = column_levels(surface_messages, pressure_messages, x, y, options)?;
     let reference_message = surface_messages
         .first()
         .or_else(|| pressure_messages.first())
@@ -479,6 +508,7 @@ fn column_levels(
     pressure_messages: &[DecodedMessage],
     x: usize,
     y: usize,
+    options: &SurfaceCorrectionOptions,
 ) -> Result<Vec<SoundingLevel>> {
     let surface_pressure_hpa = value_at(
         &find_message(surface_messages, "PRES", "surface")?.field,
@@ -491,16 +521,22 @@ fn column_levels(
         x,
         y,
     )? as f64;
-    let surface_temperature_c = kelvin_to_celsius(value_at(
-        &find_message(surface_messages, "TMP", "2 m above ground")?.field,
+    let surface_temperature_c = kelvin_to_celsius(surface_value_with_lake_interp(
+        surface_messages,
+        "TMP",
+        "2 m above ground",
         x,
         y,
-    )? as f64);
-    let surface_dewpoint_c = kelvin_to_celsius(value_at(
-        &find_message(surface_messages, "DPT", "2 m above ground")?.field,
+        options,
+    )?);
+    let surface_dewpoint_c = kelvin_to_celsius(surface_value_with_lake_interp(
+        surface_messages,
+        "DPT",
+        "2 m above ground",
         x,
         y,
-    )? as f64);
+        options,
+    )?);
     let surface_u_ms = value_at(
         &find_message(surface_messages, "UGRD", "10 m above ground")?.field,
         x,
@@ -590,6 +626,92 @@ fn column_levels(
     }
 
     Ok(levels)
+}
+
+fn surface_value_with_lake_interp(
+    surface_messages: &[DecodedMessage],
+    short_name: &str,
+    level: &str,
+    x: usize,
+    y: usize,
+    options: &SurfaceCorrectionOptions,
+) -> Result<f64> {
+    let field = &find_message(surface_messages, short_name, level)?.field;
+    let raw_value = value_at(field, x, y)? as f64;
+    let Some(radius) = options
+        .lake_interp_radius_gridpoints
+        .filter(|value| *value > 0)
+    else {
+        return Ok(raw_value);
+    };
+    let Some(mask) = find_surface_land_mask(surface_messages) else {
+        return Ok(raw_value);
+    };
+    if land_mask_value_at(mask, x, y)? >= 0.5 {
+        return Ok(raw_value);
+    }
+    Ok(interpolate_from_surrounding_land(field, mask, x, y, radius)?.unwrap_or(raw_value))
+}
+
+fn find_surface_land_mask(surface_messages: &[DecodedMessage]) -> Option<&Field2D> {
+    surface_messages.iter().find_map(|message| {
+        let short_name = message.field.metadata.short_name.to_ascii_uppercase();
+        let parameter = message.field.metadata.parameter.to_ascii_lowercase();
+        if matches!(short_name.as_str(), "LAND" | "LANDMASK" | "LSM")
+            || parameter.contains("land-sea mask")
+            || parameter.contains("land mask")
+        {
+            Some(&message.field)
+        } else {
+            None
+        }
+    })
+}
+
+fn land_mask_value_at(field: &Field2D, x: usize, y: usize) -> Result<f64> {
+    Ok(value_at(field, x, y)? as f64)
+}
+
+fn interpolate_from_surrounding_land(
+    field: &Field2D,
+    land_mask: &Field2D,
+    x: usize,
+    y: usize,
+    radius: usize,
+) -> Result<Option<f64>> {
+    let mut weighted_sum = 0.0f64;
+    let mut total_weight = 0.0f64;
+    let x0 = x.saturating_sub(radius);
+    let y0 = y.saturating_sub(radius);
+    let x1 = (x + radius).min(field.grid.nx.saturating_sub(1));
+    let y1 = (y + radius).min(field.grid.ny.saturating_sub(1));
+
+    for sample_y in y0..=y1 {
+        for sample_x in x0..=x1 {
+            if sample_x == x && sample_y == y {
+                continue;
+            }
+            if land_mask_value_at(land_mask, sample_x, sample_y)? < 0.5 {
+                continue;
+            }
+            let value = value_at(field, sample_x, sample_y)? as f64;
+            if !value.is_finite() {
+                continue;
+            }
+            let dx = sample_x as f64 - x as f64;
+            let dy = sample_y as f64 - y as f64;
+            let distance = (dx * dx + dy * dy).sqrt().max(1.0);
+            let weight = 1.0 / distance;
+            weighted_sum += value * weight;
+            total_weight += weight;
+        }
+    }
+
+    if total_weight > 0.0 {
+        Ok(Some(weighted_sum / total_weight))
+    } else {
+        Ok(None)
+    }
 }
 
 fn find_message<'a>(

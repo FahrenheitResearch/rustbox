@@ -68,6 +68,7 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - staged-subset decode entry points for archive downloads
   - bundle summaries and 2D-to-3D field stacking for repeated pressure-level variables
   - HRRR-specific surface/pressure column extraction into `SoundingProfile`
+  - optional lake-interpolation correction at model-column extraction time for 2 m thermo when a decoded land/sea mask is present
   - bundle-consistency checks across decoded surface/pressure fields
   - a fixed regression-tested HRRR demo column at grid point `(1798, 1058)`
 - What was intentionally left out:
@@ -140,9 +141,11 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - `wrf-rust-plots`: `2088e9599dcf7c7e55be5261c935a48c7afbdd60`
   - `sharprs`: `16cf0757304eb690d0208c304e32a4676178f00a`
 - Source files:
+  - `upstream/wrf-rust-plots/crates/wrf-render/src/text.rs`
+  - `upstream/wrf-rust-plots/crates/wrf-render/src/colormap.rs`
   - `upstream/wrf-rust-plots/crates/wrf-render/src/colormaps.rs`
   - `upstream/wrf-rust-plots/crates/wrf-render/src/features.rs`
-  - `upstream/wrf-rust-plots/crates/wrf-render/src/projection.rs`
+  - `upstream/wrf-rust-plots/src/py_render.rs`
   - `upstream/sharprs/src/render/compositor.rs`
   - `upstream/sharprs/src/render/skewt.rs`
   - `upstream/sharprs/src/render/hodograph.rs`
@@ -150,12 +153,16 @@ This file tracks the first real vertical slice that replaced the original scaffo
   - `upstream/sharprs/src/render/param_table.rs`
 - Adapted into:
   - [crates/wx-render/src/lib.rs](../crates/wx-render/src/lib.rs)
+  - [crates/wx-render/src/colormap.rs](../crates/wx-render/src/colormap.rs)
+  - [crates/wx-render/src/colormaps.rs](../crates/wx-render/src/colormaps.rs)
   - [crates/wx-render/src/map_render.rs](../crates/wx-render/src/map_render.rs)
+  - [crates/wx-render/src/style.rs](../crates/wx-render/src/style.rs)
   - [crates/wx-render/src/text.rs](../crates/wx-render/src/text.rs)
 - What was adapted:
-  - wind palette anchor colors
-  - frontogenesis/vorticity diagnostic palettes
-  - simple native raster overlay approach
+  - TTF-backed anti-aliased text rendering with Windows/matplotlib font discovery and bitmap fallback
+  - Solarpower07 palette tables plus leveled-colormap, extend, mask-below, and tick-step behavior for the current product surface
+  - product-aware style mapping for winds, temperature, reflectivity, CAPE/SRH/STP, vorticity, divergence, advection, and frontogenesis
+  - simple native raster overlay approach upgraded to use the local style engine instead of raw linear palette indexing
   - projected basemap-backed map rendering over local `GridSpec` projection metadata
   - Natural Earth coastline, country-boundary, and state-line feature loading from checked-in assets
   - SHARPrs full-sounding PNG generation over local `SoundingProfile` conversion

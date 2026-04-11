@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 font8x8.workspace = true
 image.workspace = true
+rusttype.workspace = true
 shapefile.workspace = true
 sharprs.workspace = true
 wx-thermo = { path = "../wx-thermo" }
