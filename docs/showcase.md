@@ -160,9 +160,5 @@ The current showcase is real, but the platform is not fully closed yet.
 If you want to re-run the exact current showcase:
 
 ```powershell
-cargo run -p wx-cli -- demo
-cargo run -p mesoanalysis-app -- demo
-cargo run -p radar-viewer-app -- inspect tests/fixtures/KATX20240101_000258_partial_V06
-cargo run -p radar-viewer-app -- detect tests/fixtures/KATX20240101_000258_partial_V06
-cargo run -p radar-viewer-app -- render tests/fixtures/KATX20240101_000258_partial_V06 REF target/demo/radar_reflectivity.png 0 512 classic default
+.\scripts\regenerate-showcase.ps1
 ```
