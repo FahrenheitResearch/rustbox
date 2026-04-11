@@ -77,6 +77,7 @@ fn draw_text_inner(
     kind: FontKind,
 ) {
     if let Some(font) = get_font(kind) {
+        draw_ttf_halo(img, text, x, y, color, scale, font, kind);
         draw_ttf_text(img, text, x, y, color, scale, font, kind);
     } else {
         draw_bitmap_text(img, text, x, y, color, scale);
@@ -138,6 +139,29 @@ fn draw_ttf_text(
                     Rgba([color.0[0], color.0[1], color.0[2], alpha]),
                 );
             });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_ttf_halo(
+    img: &mut RgbaImage,
+    text: &str,
+    x: i32,
+    y: i32,
+    color: Rgba<u8>,
+    scale_tag: u32,
+    font: &Font<'static>,
+    kind: FontKind,
+) {
+    let halo = halo_color(color);
+    let radius = if scale_tag >= 3 { 2 } else { 1 };
+    for oy in -radius..=radius {
+        for ox in -radius..=radius {
+            if ox == 0 && oy == 0 {
+                continue;
+            }
+            draw_ttf_text(img, text, x + ox, y + oy, halo, scale_tag, font, kind);
         }
     }
 }
@@ -205,12 +229,22 @@ fn blend_pixel(img: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
 
 fn font_size_px(scale: u32, kind: FontKind) -> f32 {
     match (scale.max(1), kind) {
-        (1, FontKind::Regular) => 12.0,
-        (1, FontKind::Bold) => 15.0,
-        (2, FontKind::Regular) => 16.0,
-        (2, FontKind::Bold) => 19.0,
-        (value, FontKind::Regular) => 12.0 + (value as f32 - 1.0) * 4.0,
-        (value, FontKind::Bold) => 15.0 + (value as f32 - 1.0) * 4.0,
+        (1, FontKind::Regular) => 13.0,
+        (1, FontKind::Bold) => 16.0,
+        (2, FontKind::Regular) => 18.0,
+        (2, FontKind::Bold) => 22.0,
+        (value, FontKind::Regular) => 13.0 + (value as f32 - 1.0) * 5.0,
+        (value, FontKind::Bold) => 16.0 + (value as f32 - 1.0) * 5.5,
+    }
+}
+
+fn halo_color(color: Rgba<u8>) -> Rgba<u8> {
+    let luminance =
+        0.2126 * color.0[0] as f32 + 0.7152 * color.0[1] as f32 + 0.0722 * color.0[2] as f32;
+    if luminance > 140.0 {
+        Rgba([22, 28, 36, 168])
+    } else {
+        Rgba([255, 255, 255, 184])
     }
 }
 

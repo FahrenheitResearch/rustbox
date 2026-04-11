@@ -147,8 +147,8 @@ fn rasterize_field(
     layout: PlotLayout,
 ) {
     for py in 0..layout.height {
-        let grid_y = projected_grid.extent.y_min
-            + ((py as f64 + 0.5) / layout.height as f64)
+        let grid_y = projected_grid.extent.y_max
+            - ((py as f64 + 0.5) / layout.height as f64)
                 * (projected_grid.extent.y_max - projected_grid.extent.y_min);
         for px in 0..layout.width {
             let grid_x = projected_grid.extent.x_min
@@ -541,7 +541,7 @@ impl MapExtent {
         }
         Some((
             rx * (width.saturating_sub(1)) as f64,
-            ry * (height.saturating_sub(1)) as f64,
+            (1.0 - ry) * (height.saturating_sub(1)) as f64,
         ))
     }
 }
@@ -961,6 +961,18 @@ mod tests {
         assert!((-70.0..=-55.0).contains(&lon_max), "lon_max={lon_max}");
         assert!((20.0..=25.0).contains(&lat_min), "lat_min={lat_min}");
         assert!((47.0..=55.0).contains(&lat_max), "lat_max={lat_max}");
+    }
+
+    #[test]
+    fn pixel_coords_map_south_to_bottom_and_north_to_top() {
+        let extent = MapExtent::from_bounds(0.0, 10.0, 0.0, 10.0, 1.0);
+
+        let (_, south_y) = extent.pixel_coords(0.0, 0.0, 100, 100).expect("south point");
+        let (_, north_y) = extent.pixel_coords(0.0, 10.0, 100, 100).expect("north point");
+
+        assert!(south_y > north_y, "south_y={south_y} north_y={north_y}");
+        assert!((south_y - 99.0).abs() < 0.1, "south_y={south_y}");
+        assert!(north_y.abs() < 0.1, "north_y={north_y}");
     }
 }
 
