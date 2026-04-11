@@ -251,6 +251,17 @@ fn font_candidates(bold: bool) -> Vec<PathBuf> {
         candidates.push(PathBuf::from(path));
     }
 
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts").join(if bold {
+        "segoeuib.ttf"
+    } else {
+        "segoeui.ttf"
+    }));
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts").join(if bold {
+        "arialbd.ttf"
+    } else {
+        "arial.ttf"
+    }));
+
     if let Ok(home) = env::var("USERPROFILE") {
         let home = PathBuf::from(home);
         let matplotlib = home
@@ -291,16 +302,6 @@ fn font_candidates(bold: bool) -> Vec<PathBuf> {
             },
         ),
     );
-    candidates.push(PathBuf::from(r"C:\Windows\Fonts").join(if bold {
-        "arialbd.ttf"
-    } else {
-        "arial.ttf"
-    }));
-    candidates.push(PathBuf::from(r"C:\Windows\Fonts").join(if bold {
-        "segoeuib.ttf"
-    } else {
-        "segoeui.ttf"
-    }));
 
     candidates
 }
