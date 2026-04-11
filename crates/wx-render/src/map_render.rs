@@ -127,6 +127,20 @@ pub fn render_field_to_map_png(
     })
 }
 
+pub(crate) fn field_rows_increase_northward(field: &Field2D) -> bool {
+    let Ok(projector) = Projector::from_field(field) else {
+        return false;
+    };
+    let Some((south_lat, _)) = projector.grid_to_latlon(0.0, 0.0) else {
+        return false;
+    };
+    let Some((north_lat, _)) = projector.grid_to_latlon(0.0, field.grid.ny.saturating_sub(1) as f64)
+    else {
+        return false;
+    };
+    north_lat > south_lat
+}
+
 fn validate_field_shape(field: &Field2D) -> Result<()> {
     if field.values.len() != field.expected_len() {
         bail!(

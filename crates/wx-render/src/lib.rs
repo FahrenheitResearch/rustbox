@@ -80,26 +80,35 @@ pub fn render_field_to_png(
         .or_else(|| field.finite_min_max())
         .context("field did not contain any finite values to render")?;
     let style = resolve_render_style(&spec.palette, spec.value_range)?;
+    let rows_increase_northward = map_render::field_rows_increase_northward(field);
 
     let mut image: RgbaImage = ImageBuffer::new(field.grid.nx as u32, field.grid.ny as u32);
-    for (index, pixel) in image.pixels_mut().enumerate() {
-        let value = field.values[index];
-        *pixel = if !value.is_finite() {
-            Rgba([0, 0, 0, 0])
+    for render_y in 0..field.grid.ny {
+        let source_y = if rows_increase_northward {
+            field.grid.ny - 1 - render_y
         } else {
-            let mut color = style.color_for_value(value as f64);
-            if color.0[3] == 0 {
+            render_y
+        };
+        for x in 0..field.grid.nx {
+            let value = field.values[source_y * field.grid.nx + x];
+            let pixel = image.get_pixel_mut(x as u32, render_y as u32);
+            *pixel = if !value.is_finite() {
                 Rgba([0, 0, 0, 0])
             } else {
-                let normalized = style.normalized_value(value as f64).unwrap_or(1.0);
-                color.0[3] = if spec.transparent_background {
-                    (40.0 + normalized * 180.0).round().clamp(0.0, 220.0) as u8
+                let mut color = style.color_for_value(value as f64);
+                if color.0[3] == 0 {
+                    Rgba([0, 0, 0, 0])
                 } else {
-                    u8::MAX
-                };
-                color
-            }
-        };
+                    let normalized = style.normalized_value(value as f64).unwrap_or(1.0);
+                    color.0[3] = if spec.transparent_background {
+                        (40.0 + normalized * 180.0).round().clamp(0.0, 220.0) as u8
+                    } else {
+                        u8::MAX
+                    };
+                    color
+                }
+            };
+        }
     }
 
     write_image(&image, output_path)?;
@@ -205,6 +214,35 @@ mod tests {
         let bytes = std::fs::read(&overlay.output_path).expect("png should be readable");
         assert!(bytes.len() > 100);
         assert_eq!(&bytes[0..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn hrrr_overlay_rows_are_detected_as_south_to_north() {
+        let idx_text = std::fs::read_to_string(fixture_path("hrrr_gust_surface_fragment.idx"))
+            .expect("fixture idx should be readable");
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        let plan = plan_hrrr_subset(
+            &HrrrSubsetRequest {
+                cycle,
+                forecast_hour: 0,
+                product: "sfc".to_string(),
+                selections: vec![HrrrSelectionRequest {
+                    variable: "GUST".to_string(),
+                    level: "surface".to_string(),
+                    forecast: None,
+                }],
+            },
+            &idx_text,
+        )
+        .expect("plan should succeed");
+        let field =
+            decode_selected_message(&fixture_path("hrrr_gust_surface_fragment.grib2"), &plan)
+                .expect("decode should succeed");
+
+        assert!(map_render::field_rows_increase_northward(&field));
     }
 
     #[test]
