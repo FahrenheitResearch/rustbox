@@ -127,20 +127,6 @@ pub fn render_field_to_map_png(
     })
 }
 
-pub(crate) fn field_rows_increase_northward(field: &Field2D) -> bool {
-    let Ok(projector) = Projector::from_field(field) else {
-        return false;
-    };
-    let Some((south_lat, _)) = projector.grid_to_latlon(0.0, 0.0) else {
-        return false;
-    };
-    let Some((north_lat, _)) = projector.grid_to_latlon(0.0, field.grid.ny.saturating_sub(1) as f64)
-    else {
-        return false;
-    };
-    north_lat > south_lat
-}
-
 fn validate_field_shape(field: &Field2D) -> Result<()> {
     if field.values.len() != field.expected_len() {
         bail!(
@@ -161,8 +147,8 @@ fn rasterize_field(
     layout: PlotLayout,
 ) {
     for py in 0..layout.height {
-        let grid_y = projected_grid.extent.y_max
-            - ((py as f64 + 0.5) / layout.height as f64)
+        let grid_y = projected_grid.extent.y_min
+            + ((py as f64 + 0.5) / layout.height as f64)
                 * (projected_grid.extent.y_max - projected_grid.extent.y_min);
         for px in 0..layout.width {
             let grid_x = projected_grid.extent.x_min
@@ -386,7 +372,8 @@ fn project_to_pixel(
     lon: f64,
     layout: PlotLayout,
 ) -> Option<(f64, f64)> {
-    let (grid_x, grid_y) = projected_grid.projector.latlon_to_grid(lat, lon)?;
+    let (grid_x, native_grid_y) = projected_grid.projector.latlon_to_grid(lat, lon)?;
+    let grid_y = projected_grid.native_y_to_display_y(native_grid_y);
     let (px, py) =
         projected_grid
             .extent
@@ -476,6 +463,7 @@ fn build_projected_grid(field: &Field2D, target_ratio: f64) -> Result<ProjectedG
         extent,
         nx: field.grid.nx,
         ny: field.grid.ny,
+        rows_normalized_north_to_south: field.grid.scan_mode & 0x40 != 0,
     })
 }
 
@@ -555,7 +543,7 @@ impl MapExtent {
         }
         Some((
             rx * (width.saturating_sub(1)) as f64,
-            (1.0 - ry) * (height.saturating_sub(1)) as f64,
+            ry * (height.saturating_sub(1)) as f64,
         ))
     }
 }
@@ -566,6 +554,7 @@ struct ProjectedGrid {
     extent: MapExtent,
     nx: usize,
     ny: usize,
+    rows_normalized_north_to_south: bool,
 }
 
 impl ProjectedGrid {
@@ -608,7 +597,8 @@ impl ProjectedGrid {
         let mut any = false;
 
         for (grid_x, grid_y) in sample_points {
-            let Some((lat, lon)) = self.projector.grid_to_latlon(grid_x, grid_y) else {
+            let native_grid_y = self.display_y_to_native_y(grid_y);
+            let Some((lat, lon)) = self.projector.grid_to_latlon(grid_x, native_grid_y) else {
                 continue;
             };
             any = true;
@@ -619,6 +609,22 @@ impl ProjectedGrid {
         }
 
         any.then_some((lat_min, lat_max, lon_min, lon_max))
+    }
+
+    fn native_y_to_display_y(&self, native_y: f64) -> f64 {
+        if self.rows_normalized_north_to_south {
+            self.ny.saturating_sub(1) as f64 - native_y
+        } else {
+            native_y
+        }
+    }
+
+    fn display_y_to_native_y(&self, display_y: f64) -> f64 {
+        if self.rows_normalized_north_to_south {
+            self.ny.saturating_sub(1) as f64 - display_y
+        } else {
+            display_y
+        }
     }
 }
 
@@ -984,9 +990,33 @@ mod tests {
         let (_, south_y) = extent.pixel_coords(0.0, 0.0, 100, 100).expect("south point");
         let (_, north_y) = extent.pixel_coords(0.0, 10.0, 100, 100).expect("north point");
 
-        assert!(south_y > north_y, "south_y={south_y} north_y={north_y}");
-        assert!((south_y - 99.0).abs() < 0.1, "south_y={south_y}");
-        assert!(north_y.abs() < 0.1, "north_y={north_y}");
+        assert!(south_y < north_y, "south_y={south_y} north_y={north_y}");
+        assert!(south_y.abs() < 0.1, "south_y={south_y}");
+        assert!((north_y - 99.0).abs() < 0.1, "north_y={north_y}");
+    }
+
+    #[test]
+    fn normalized_hrrr_rows_flip_native_y_for_projection() {
+        let projection =
+            HrrrLambertProjection::new(38.5, 38.5, 262.5, 21.138123, -122.719528, 3000.0, 3000.0);
+        let projected = ProjectedGrid {
+            projector: Projector::Lambert(projection),
+            extent: MapExtent::from_bounds(0.0, 1798.0, 0.0, 1058.0, 1.0),
+            nx: 1799,
+            ny: 1059,
+            rows_normalized_north_to_south: true,
+        };
+
+        let (north_lat, _) = projected
+            .projector
+            .grid_to_latlon(0.0, projected.display_y_to_native_y(0.0))
+            .expect("north row");
+        let (south_lat, _) = projected
+            .projector
+            .grid_to_latlon(0.0, projected.display_y_to_native_y(1058.0))
+            .expect("south row");
+
+        assert!(north_lat > south_lat, "north_lat={north_lat} south_lat={south_lat}");
     }
 }
 
