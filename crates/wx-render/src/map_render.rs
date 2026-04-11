@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use wx_types::{Field2D, ProjectionKind};
 
-const EARTH_RADIUS_M: f64 = 6_370_000.0;
+const EARTH_RADIUS_M: f64 = 6_371_229.0;
 const DEG2RAD: f64 = PI / 180.0;
+const RAD2DEG: f64 = 180.0 / PI;
 
 const CANVAS_WIDTH: u32 = 1600;
 const CANVAS_HEIGHT: u32 = 1000;
@@ -26,7 +27,7 @@ const BORDER: Rgba<u8> = Rgba([90, 105, 120, 255]);
 const COASTLINE: Rgba<u8> = Rgba([54, 77, 97, 255]);
 const COUNTRY: Rgba<u8> = Rgba([102, 116, 130, 255]);
 const STATE: Rgba<u8> = Rgba([150, 160, 172, 255]);
-const GRATICULE: Rgba<u8> = Rgba([198, 209, 220, 255]);
+const GRATICULE: Rgba<u8> = Rgba([206, 215, 224, 255]);
 const TITLE_TEXT: Rgba<u8> = Rgba([28, 39, 51, 255]);
 const SUBTITLE_TEXT: Rgba<u8> = Rgba([76, 92, 110, 255]);
 const MARKER_COLOR: Rgba<u8> = Rgba([206, 42, 42, 255]);
@@ -59,17 +60,16 @@ pub fn render_field_to_map_png(
         .value_range
         .or_else(|| field.finite_min_max())
         .context("field did not contain any finite values to render")?;
-    let value_span = if (value_max - value_min).abs() < f32::EPSILON {
-        1.0
-    } else {
-        value_max - value_min
-    };
-    let palette = palette_by_name(&spec.palette)?;
     let scale = ValueScale {
         min: value_min,
         max: value_max,
-        span: value_span,
+        span: if (value_max - value_min).abs() < f32::EPSILON {
+            1.0
+        } else {
+            value_max - value_min
+        },
     };
+    let palette = palette_by_name(&spec.palette)?;
     let layout = PlotLayout {
         x: OUTER_PAD,
         y: OUTER_PAD + TITLE_HEIGHT,
@@ -77,6 +77,7 @@ pub fn render_field_to_map_png(
         height: CANVAS_HEIGHT - OUTER_PAD * 2 - TITLE_HEIGHT - FOOTER_HEIGHT,
     };
 
+    let model_grid = build_model_grid(field, layout.width as f64 / layout.height as f64)?;
     let mut image: RgbaImage = ImageBuffer::from_pixel(CANVAS_WIDTH, CANVAS_HEIGHT, PAGE_BG);
     fill_rect(
         &mut image,
@@ -87,11 +88,10 @@ pub fn render_field_to_map_png(
         MAP_BG,
     );
 
-    let projected_grid = build_projected_grid(field, layout.width as f64 / layout.height as f64)?;
-    rasterize_field(&mut image, field, &projected_grid, &palette, scale, layout);
-    draw_graticule(&mut image, &projected_grid, layout);
-    draw_basemap_features(&mut image, &projected_grid, layout);
-    draw_marker_overlays(&mut image, &projected_grid, &spec.markers, layout);
+    rasterize_field(&mut image, field, &model_grid, &palette, scale, layout);
+    draw_graticule(&mut image, &model_grid.geo_extent, layout);
+    draw_basemap_features(&mut image, &model_grid.geo_extent, layout);
+    draw_marker_overlays(&mut image, &model_grid, &spec.markers, layout);
     draw_rect_outline(
         &mut image,
         layout.x,
@@ -134,8 +134,7 @@ pub fn render_field_to_map_png(
 }
 
 fn validate_field_shape(field: &Field2D) -> Result<()> {
-    let expected_len = field.expected_len();
-    if field.values.len() != expected_len {
+    if field.values.len() != field.expected_len() {
         bail!(
             "field value count {} does not match grid {}x{}",
             field.values.len(),
@@ -149,27 +148,29 @@ fn validate_field_shape(field: &Field2D) -> Result<()> {
 fn rasterize_field(
     image: &mut RgbaImage,
     field: &Field2D,
-    projected_grid: &ProjectedGrid,
+    model_grid: &ModelGrid,
     palette: &[Rgba<u8>],
     scale: ValueScale,
     layout: PlotLayout,
 ) {
     for py in 0..layout.height {
-        let y = projected_grid.extent.y_max
+        let lat = model_grid.geo_extent.lat_max
             - ((py as f64 + 0.5) / layout.height as f64)
-                * (projected_grid.extent.y_max - projected_grid.extent.y_min);
+                * (model_grid.geo_extent.lat_max - model_grid.geo_extent.lat_min);
         for px in 0..layout.width {
-            let x = projected_grid.extent.x_min
+            let lon = model_grid.geo_extent.lon_min
                 + ((px as f64 + 0.5) / layout.width as f64)
-                    * (projected_grid.extent.x_max - projected_grid.extent.x_min);
-            let i = ((x - projected_grid.x0) / projected_grid.x_step).round() as isize;
-            let j = ((y - projected_grid.y0) / projected_grid.y_step).round() as isize;
+                    * (model_grid.geo_extent.lon_max - model_grid.geo_extent.lon_min);
+            let Some((grid_i, grid_j)) = model_grid.projector.latlon_to_grid(lat, lon) else {
+                continue;
+            };
+            let i = grid_i.round() as isize;
+            let j = grid_j.round() as isize;
             if i < 0 || j < 0 || i >= field.grid.nx as isize || j >= field.grid.ny as isize {
                 continue;
             }
 
-            let index = j as usize * field.grid.nx + i as usize;
-            let value = field.values[index];
+            let value = field.values[j as usize * field.grid.nx + i as usize];
             if !value.is_finite() {
                 continue;
             }
@@ -266,7 +267,7 @@ fn draw_colorbar(
         image,
         &label,
         (layout.x + layout.width / 2) as i32,
-        (layout.y.saturating_sub(18)) as i32,
+        layout.y.saturating_sub(18) as i32,
         TITLE_TEXT,
         1,
     );
@@ -301,17 +302,18 @@ fn draw_colorbar(
 
 fn draw_marker_overlays(
     image: &mut RgbaImage,
-    projected_grid: &ProjectedGrid,
+    model_grid: &ModelGrid,
     markers: &[MapMarker],
     layout: PlotLayout,
 ) {
     for marker in markers {
-        let marker_x = projected_grid.x0 + projected_grid.x_step * marker.grid_x as f64;
-        let marker_y = projected_grid.y0 + projected_grid.y_step * marker.grid_y as f64;
+        let Some((lat, lon)) = model_grid.grid_to_latlon(marker.grid_x, marker.grid_y) else {
+            continue;
+        };
         let Some((px, py)) =
-            projected_grid
-                .extent
-                .to_pixel(marker_x, marker_y, layout.width, layout.height)
+            model_grid
+                .geo_extent
+                .pixel_coords(lon, lat, layout.width, layout.height)
         else {
             continue;
         };
@@ -328,70 +330,60 @@ fn draw_marker_overlays(
     }
 }
 
-fn draw_graticule(image: &mut RgbaImage, projected_grid: &ProjectedGrid, layout: PlotLayout) {
-    let lat_bounds = projected_grid.lat_bounds();
-    let lon_bounds = projected_grid.lon_bounds();
-    let start_lat = ((lat_bounds.0 - 2.0) / 5.0).floor() as i32 * 5;
-    let end_lat = ((lat_bounds.1 + 2.0) / 5.0).ceil() as i32 * 5;
-    let start_lon = ((lon_bounds.0 - 2.0) / 5.0).floor() as i32 * 5;
-    let end_lon = ((lon_bounds.1 + 2.0) / 5.0).ceil() as i32 * 5;
+fn draw_graticule(image: &mut RgbaImage, extent: &GeoExtent, layout: PlotLayout) {
+    let start_lat = ((extent.lat_min - 2.0) / 5.0).floor() as i32 * 5;
+    let end_lat = ((extent.lat_max + 2.0) / 5.0).ceil() as i32 * 5;
+    let start_lon = ((extent.lon_min - 2.0) / 5.0).floor() as i32 * 5;
+    let end_lon = ((extent.lon_max + 2.0) / 5.0).ceil() as i32 * 5;
 
     for lat in (start_lat..=end_lat).step_by(5) {
-        let mut points = Vec::new();
-        for lon in start_lon..=end_lon {
-            if let Some(point) = project_to_pixel(projected_grid, lat as f64, lon as f64, layout) {
-                points.push(point);
-            }
+        if let (Some((x0, y0)), Some((x1, y1))) = (
+            extent.pixel_coords(start_lon as f64, lat as f64, layout.width, layout.height),
+            extent.pixel_coords(end_lon as f64, lat as f64, layout.width, layout.height),
+        ) {
+            draw_line(
+                image,
+                layout.x as f64 + x0,
+                layout.y as f64 + y0,
+                layout.x as f64 + x1,
+                layout.y as f64 + y1,
+                GRATICULE,
+                1,
+            );
         }
-        draw_polyline(image, &points, GRATICULE, 1);
     }
 
     for lon in (start_lon..=end_lon).step_by(5) {
-        let mut points = Vec::new();
-        for lat in start_lat..=end_lat {
-            if let Some(point) = project_to_pixel(projected_grid, lat as f64, lon as f64, layout) {
-                points.push(point);
-            }
+        if let (Some((x0, y0)), Some((x1, y1))) = (
+            extent.pixel_coords(lon as f64, start_lat as f64, layout.width, layout.height),
+            extent.pixel_coords(lon as f64, end_lat as f64, layout.width, layout.height),
+        ) {
+            draw_line(
+                image,
+                layout.x as f64 + x0,
+                layout.y as f64 + y0,
+                layout.x as f64 + x1,
+                layout.y as f64 + y1,
+                GRATICULE,
+                1,
+            );
         }
-        draw_polyline(image, &points, GRATICULE, 1);
     }
 }
 
-fn draw_basemap_features(
-    image: &mut RgbaImage,
-    projected_grid: &ProjectedGrid,
-    layout: PlotLayout,
-) {
+fn draw_basemap_features(image: &mut RgbaImage, extent: &GeoExtent, layout: PlotLayout) {
     for layer in load_basemap_layers() {
         for line in &layer.lines {
-            for segment in line.windows(2) {
-                let Some((x0, y0)) =
-                    project_to_pixel(projected_grid, segment[0].1, segment[0].0, layout)
-                else {
-                    continue;
-                };
-                let Some((x1, y1)) =
-                    project_to_pixel(projected_grid, segment[1].1, segment[1].0, layout)
-                else {
-                    continue;
-                };
-                draw_line(image, x0, y0, x1, y1, layer.color, layer.width);
+            let mut projected = Vec::with_capacity(line.len());
+            for (lon, lat) in line {
+                if let Some((px, py)) = extent.pixel_coords(*lon, *lat, layout.width, layout.height)
+                {
+                    projected.push((layout.x as f64 + px, layout.y as f64 + py));
+                }
             }
+            draw_polyline(image, &projected, layer.color, layer.width);
         }
     }
-}
-
-fn project_to_pixel(
-    projected_grid: &ProjectedGrid,
-    lat: f64,
-    lon: f64,
-    layout: PlotLayout,
-) -> Option<(f64, f64)> {
-    let (x, y) = projected_grid.projector.project(lat, lon);
-    let (px, py) = projected_grid
-        .extent
-        .to_pixel(x, y, layout.width, layout.height)?;
-    Some((layout.x as f64 + px, layout.y as f64 + py))
 }
 
 fn load_basemap_layers() -> &'static [BasemapLayer] {
@@ -461,50 +453,36 @@ fn load_lines_from_shapefile(path: &Path) -> Result<Vec<LonLatLine>> {
     Ok(lines)
 }
 
-fn build_projected_grid(field: &Field2D, target_ratio: f64) -> Result<ProjectedGrid> {
+fn build_model_grid(field: &Field2D, target_ratio: f64) -> Result<ModelGrid> {
     let projector = Projector::from_field(field)?;
-    let (x0, y0) = projector.project(
-        field.grid.coordinates.lat1,
-        normalize_lon(field.grid.coordinates.lon1),
-    );
-    let (x_last, y_last) = projector.project(
-        field.grid.coordinates.lat2,
-        normalize_lon(field.grid.coordinates.lon2),
-    );
+    let nx = field.grid.nx.saturating_sub(1) as f64;
+    let ny = field.grid.ny.saturating_sub(1) as f64;
+    let corners = [
+        projector.grid_to_latlon(0.0, 0.0),
+        projector.grid_to_latlon(nx, 0.0),
+        projector.grid_to_latlon(0.0, ny),
+        projector.grid_to_latlon(nx, ny),
+    ];
+    let mut lat_min = f64::INFINITY;
+    let mut lat_max = f64::NEG_INFINITY;
+    let mut lon_min = f64::INFINITY;
+    let mut lon_max = f64::NEG_INFINITY;
+    for corner in corners {
+        let Some((lat, lon)) = corner else {
+            continue;
+        };
+        lat_min = lat_min.min(lat);
+        lat_max = lat_max.max(lat);
+        lon_min = lon_min.min(lon);
+        lon_max = lon_max.max(lon);
+    }
+    if !lat_min.is_finite() || !lon_min.is_finite() {
+        bail!("failed to derive geographic bounds for projected field");
+    }
 
-    let x_sign = if (x_last - x0).abs() < 1.0 {
-        1.0
-    } else {
-        (x_last - x0).signum()
-    };
-    let y_sign = if (y_last - y0).abs() < 1.0 {
-        1.0
-    } else {
-        (y_last - y0).signum()
-    };
-    let x_step = field.grid.coordinates.dx * x_sign;
-    let y_step = field.grid.coordinates.dy * y_sign;
-    let x_end = x0 + x_step * (field.grid.nx.saturating_sub(1) as f64);
-    let y_end = y0 + y_step * (field.grid.ny.saturating_sub(1) as f64);
-    let extent = MapExtent::from_bounds(
-        x0.min(x_end),
-        x0.max(x_end),
-        y0.min(y_end),
-        y0.max(y_end),
-        target_ratio,
-    );
-
-    Ok(ProjectedGrid {
+    Ok(ModelGrid {
         projector,
-        extent,
-        x0,
-        y0,
-        x_step,
-        y_step,
-        lat1: field.grid.coordinates.lat1,
-        lon1: normalize_lon(field.grid.coordinates.lon1),
-        lat2: field.grid.coordinates.lat2,
-        lon2: normalize_lon(field.grid.coordinates.lon2),
+        geo_extent: GeoExtent::from_bounds(lon_min, lon_max, lat_min, lat_max, target_ratio),
     })
 }
 
@@ -536,68 +514,67 @@ struct BasemapLayer {
 }
 
 #[derive(Clone)]
-struct ProjectedGrid {
+struct ModelGrid {
     projector: Projector,
-    extent: MapExtent,
-    x0: f64,
-    y0: f64,
-    x_step: f64,
-    y_step: f64,
-    lat1: f64,
-    lon1: f64,
-    lat2: f64,
-    lon2: f64,
+    geo_extent: GeoExtent,
 }
 
-impl ProjectedGrid {
-    fn lat_bounds(&self) -> (f64, f64) {
-        (self.lat1.min(self.lat2), self.lat1.max(self.lat2))
-    }
-
-    fn lon_bounds(&self) -> (f64, f64) {
-        (self.lon1.min(self.lon2), self.lon1.max(self.lon2))
+impl ModelGrid {
+    fn grid_to_latlon(&self, grid_x: usize, grid_y: usize) -> Option<(f64, f64)> {
+        self.projector.grid_to_latlon(grid_x as f64, grid_y as f64)
     }
 }
 
-#[derive(Clone)]
-struct MapExtent {
-    x_min: f64,
-    x_max: f64,
-    y_min: f64,
-    y_max: f64,
+#[derive(Clone, Copy)]
+struct GeoExtent {
+    lon_min: f64,
+    lon_max: f64,
+    lat_min: f64,
+    lat_max: f64,
 }
 
-impl MapExtent {
-    fn from_bounds(x_min: f64, x_max: f64, y_min: f64, y_max: f64, target_ratio: f64) -> Self {
-        let data_width = x_max - x_min;
-        let data_height = y_max - y_min;
-        let data_ratio = data_width / data_height.max(1.0);
+impl GeoExtent {
+    fn from_bounds(
+        lon_min: f64,
+        lon_max: f64,
+        lat_min: f64,
+        lat_max: f64,
+        target_ratio: f64,
+    ) -> Self {
+        let mid_lat = ((lat_min + lat_max) * 0.5)
+            .to_radians()
+            .cos()
+            .abs()
+            .max(0.1);
+        let data_width = (lon_max - lon_min) * mid_lat;
+        let data_height = lat_max - lat_min;
+        let data_ratio = data_width / data_height.max(1e-6);
 
         if data_ratio > target_ratio {
             let new_height = data_width / target_ratio;
-            let pad = (new_height - data_height) / 2.0;
+            let pad = (new_height - data_height) * 0.5;
             Self {
-                x_min,
-                x_max,
-                y_min: y_min - pad,
-                y_max: y_max + pad,
+                lon_min,
+                lon_max,
+                lat_min: lat_min - pad,
+                lat_max: lat_max + pad,
             }
         } else {
             let new_width = data_height * target_ratio;
-            let pad = (new_width - data_width) / 2.0;
+            let pad = (new_width - data_width) * 0.5 / mid_lat;
             Self {
-                x_min: x_min - pad,
-                x_max: x_max + pad,
-                y_min,
-                y_max,
+                lon_min: lon_min - pad,
+                lon_max: lon_max + pad,
+                lat_min,
+                lat_max,
             }
         }
     }
 
-    fn to_pixel(&self, x: f64, y: f64, width: u32, height: u32) -> Option<(f64, f64)> {
-        let rx = (x - self.x_min) / (self.x_max - self.x_min);
-        let ry = 1.0 - (y - self.y_min) / (self.y_max - self.y_min);
-        if !(-0.2..=1.2).contains(&rx) || !(-0.2..=1.2).contains(&ry) {
+    fn pixel_coords(&self, lon: f64, lat: f64, width: u32, height: u32) -> Option<(f64, f64)> {
+        let rx = (lon - self.lon_min) / (self.lon_max - self.lon_min);
+        let ry = 1.0 - (lat - self.lat_min) / (self.lat_max - self.lat_min);
+        if !(-0.05..=1.05).contains(&rx) || !(-0.05..=1.05).contains(&ry) {
             return None;
         }
         Some((
@@ -609,8 +586,8 @@ impl MapExtent {
 
 #[derive(Clone)]
 enum Projector {
-    LatLon,
-    Lambert(LambertConformal),
+    LatLon(LatLonProjection),
+    Lambert(HrrrLambertProjection),
     Mercator(MercatorProjection),
     PolarStereo(PolarStereographicProjection),
 }
@@ -618,98 +595,209 @@ enum Projector {
 impl Projector {
     fn from_field(field: &Field2D) -> Result<Self> {
         match &field.grid.projection {
-            ProjectionKind::LatitudeLongitude => Ok(Self::LatLon),
+            ProjectionKind::LatitudeLongitude => Ok(Self::LatLon(LatLonProjection::new(
+                field.grid.coordinates.lat1,
+                normalize_lon(field.grid.coordinates.lon1),
+                field.grid.coordinates.lat2,
+                normalize_lon(field.grid.coordinates.lon2),
+                field.grid.nx,
+                field.grid.ny,
+            ))),
             ProjectionKind::LambertConformal {
                 latin1,
                 latin2,
                 lov,
-            } => Ok(Self::Lambert(LambertConformal::new(
+            } => Ok(Self::Lambert(HrrrLambertProjection::new(
                 *latin1,
                 *latin2,
                 *lov,
-                (field.grid.coordinates.lat1 + field.grid.coordinates.lat2) / 2.0,
+                field.grid.coordinates.lat1,
+                normalize_lon(field.grid.coordinates.lon1),
+                field.grid.coordinates.dx,
+                field.grid.coordinates.dy,
             ))),
             ProjectionKind::Mercator { lad } => Ok(Self::Mercator(MercatorProjection::new(
-                (field.grid.coordinates.lon1 + field.grid.coordinates.lon2) / 2.0,
+                (field.grid.coordinates.lon1 + field.grid.coordinates.lon2) * 0.5,
                 *lad,
+                field.grid.coordinates.lat1,
+                normalize_lon(field.grid.coordinates.lon1),
+                field.grid.coordinates.dx,
+                field.grid.coordinates.dy,
             ))),
-            ProjectionKind::PolarStereographic { lad, lov } => Ok(Self::PolarStereo(
-                PolarStereographicProjection::new(*lad, *lov),
-            )),
+            ProjectionKind::PolarStereographic { lad, lov } => {
+                Ok(Self::PolarStereo(PolarStereographicProjection::new(
+                    *lad,
+                    *lov,
+                    field.grid.coordinates.lat1,
+                    normalize_lon(field.grid.coordinates.lon1),
+                    field.grid.coordinates.dx,
+                    field.grid.coordinates.dy,
+                )))
+            }
             ProjectionKind::Unknown { template } => {
                 bail!("unsupported projection template {template} for basemap rendering")
             }
         }
     }
 
-    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+    fn latlon_to_grid(&self, lat: f64, lon: f64) -> Option<(f64, f64)> {
         match self {
-            Self::LatLon => (normalize_lon(lon), lat),
-            Self::Lambert(projection) => projection.project(lat, lon),
-            Self::Mercator(projection) => projection.project(lat, lon),
-            Self::PolarStereo(projection) => projection.project(lat, lon),
+            Self::LatLon(projection) => projection.latlon_to_grid(lat, lon),
+            Self::Lambert(projection) => Some(projection.latlon_to_grid(lat, lon)),
+            Self::Mercator(projection) => Some(projection.latlon_to_grid(lat, lon)),
+            Self::PolarStereo(projection) => Some(projection.latlon_to_grid(lat, lon)),
+        }
+    }
+
+    fn grid_to_latlon(&self, grid_x: f64, grid_y: f64) -> Option<(f64, f64)> {
+        match self {
+            Self::LatLon(projection) => projection.grid_to_latlon(grid_x, grid_y),
+            Self::Lambert(projection) => Some(projection.grid_to_latlon(grid_x, grid_y)),
+            Self::Mercator(projection) => Some(projection.grid_to_latlon(grid_x, grid_y)),
+            Self::PolarStereo(projection) => Some(projection.grid_to_latlon(grid_x, grid_y)),
         }
     }
 }
 
 #[derive(Clone)]
-struct LambertConformal {
+struct HrrrLambertProjection {
     n: f64,
-    f: f64,
-    rho0: f64,
-    lambda0: f64,
+    f_val: f64,
+    lov: f64,
+    rho1: f64,
+    theta1: f64,
+    dx: f64,
+    dy: f64,
 }
 
-impl LambertConformal {
-    fn new(truelat1: f64, truelat2: f64, stand_lon: f64, ref_lat: f64) -> Self {
+impl HrrrLambertProjection {
+    fn new(
+        truelat1: f64,
+        truelat2: f64,
+        stand_lon: f64,
+        lat1: f64,
+        lon1: f64,
+        dx: f64,
+        dy: f64,
+    ) -> Self {
         let phi1 = truelat1 * DEG2RAD;
         let phi2 = truelat2 * DEG2RAD;
-        let phi0 = ref_lat * DEG2RAD;
-        let lambda0 = stand_lon * DEG2RAD;
+        let la1 = lat1 * DEG2RAD;
+        let lo1 = normalize_lon(lon1) * DEG2RAD;
+        let lov = normalize_lon(stand_lon) * DEG2RAD;
 
         let n = if (truelat1 - truelat2).abs() < 1e-10 {
             phi1.sin()
         } else {
-            let numerator = phi1.cos().ln() - phi2.cos().ln();
-            let denominator =
+            let ln_ratio =
                 (FRAC_PI_4 + phi2 / 2.0).tan().ln() - (FRAC_PI_4 + phi1 / 2.0).tan().ln();
-            numerator / denominator
+            (phi1.cos().ln() - phi2.cos().ln()) / ln_ratio
         };
-        let f = phi1.cos() * (FRAC_PI_4 + phi1 / 2.0).tan().powf(n) / n;
-        let rho0 = EARTH_RADIUS_M * f / (FRAC_PI_4 + phi0 / 2.0).tan().powf(n);
+        let f_val = phi1.cos() * (FRAC_PI_4 + phi1 / 2.0).tan().powf(n) / n;
+        let rho1 = EARTH_RADIUS_M * f_val / (FRAC_PI_4 + la1 / 2.0).tan().powf(n);
+        let theta1 = n * (lo1 - lov);
 
         Self {
             n,
-            f,
-            rho0,
-            lambda0,
+            f_val,
+            lov,
+            rho1,
+            theta1,
+            dx,
+            dy,
         }
     }
 
-    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+    fn latlon_to_grid(&self, lat: f64, lon: f64) -> (f64, f64) {
         let phi = lat * DEG2RAD;
         let lambda = normalize_lon(lon) * DEG2RAD;
-        let rho = EARTH_RADIUS_M * self.f / (FRAC_PI_4 + phi / 2.0).tan().powf(self.n);
-        let theta = self.n * (lambda - self.lambda0);
-        let x = rho * theta.sin();
-        let y = self.rho0 - rho * theta.cos();
-        (x, y)
+        let rho = EARTH_RADIUS_M * self.f_val / (FRAC_PI_4 + phi / 2.0).tan().powf(self.n);
+        let theta = self.n * (lambda - self.lov);
+        let x = rho * theta.sin() - self.rho1 * self.theta1.sin();
+        let y = self.rho1 * self.theta1.cos() - rho * theta.cos();
+        (x / self.dx, y / self.dy)
+    }
+
+    fn grid_to_latlon(&self, grid_x: f64, grid_y: f64) -> (f64, f64) {
+        let x = self.rho1 * self.theta1.sin() + grid_x * self.dx;
+        let y = self.rho1 * self.theta1.cos() - grid_y * self.dy;
+        let rho = (x * x + y * y).sqrt() * self.n.signum();
+        let theta = x.atan2(y);
+        let lat = (2.0 * ((EARTH_RADIUS_M * self.f_val / rho).powf(1.0 / self.n)).atan()
+            - PI / 2.0)
+            * RAD2DEG;
+        let lon = normalize_lon((self.lov + theta / self.n) * RAD2DEG);
+        (lat, lon)
+    }
+}
+
+#[derive(Clone)]
+struct LatLonProjection {
+    lat1: f64,
+    lon1: f64,
+    lat2: f64,
+    lon2: f64,
+    nx: usize,
+    ny: usize,
+}
+
+impl LatLonProjection {
+    fn new(lat1: f64, lon1: f64, lat2: f64, lon2: f64, nx: usize, ny: usize) -> Self {
+        Self {
+            lat1,
+            lon1,
+            lat2,
+            lon2,
+            nx,
+            ny,
+        }
+    }
+
+    fn latlon_to_grid(&self, lat: f64, lon: f64) -> Option<(f64, f64)> {
+        let dlon = self.lon2 - self.lon1;
+        let dlat = self.lat2 - self.lat1;
+        if dlon.abs() < 1e-9 || dlat.abs() < 1e-9 {
+            return None;
+        }
+        let i = (normalize_lon(lon) - self.lon1) * (self.nx.saturating_sub(1)) as f64 / dlon;
+        let j = (lat - self.lat1) * (self.ny.saturating_sub(1)) as f64 / dlat;
+        Some((i, j))
+    }
+
+    fn grid_to_latlon(&self, grid_x: f64, grid_y: f64) -> Option<(f64, f64)> {
+        let lon = self.lon1
+            + grid_x * (self.lon2 - self.lon1) / (self.nx.saturating_sub(1)).max(1) as f64;
+        let lat = self.lat1
+            + grid_y * (self.lat2 - self.lat1) / (self.ny.saturating_sub(1)).max(1) as f64;
+        Some((lat, normalize_lon(lon)))
     }
 }
 
 #[derive(Clone)]
 struct MercatorProjection {
     lambda0: f64,
+    x0: f64,
+    y0: f64,
+    dx: f64,
+    dy: f64,
 }
 
 impl MercatorProjection {
-    fn new(central_lon: f64, _lad: f64) -> Self {
-        Self {
+    fn new(central_lon: f64, _lad: f64, lat1: f64, lon1: f64, dx: f64, dy: f64) -> Self {
+        let mut projection = Self {
             lambda0: normalize_lon(central_lon) * DEG2RAD,
-        }
+            x0: 0.0,
+            y0: 0.0,
+            dx,
+            dy,
+        };
+        let (x0, y0) = projection.project_xy(lat1, lon1);
+        projection.x0 = x0;
+        projection.y0 = y0;
+        projection
     }
 
-    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+    fn project_xy(&self, lat: f64, lon: f64) -> (f64, f64) {
         let phi = lat.clamp(-85.0, 85.0) * DEG2RAD;
         let lambda = normalize_lon(lon) * DEG2RAD;
         (
@@ -717,23 +805,50 @@ impl MercatorProjection {
             EARTH_RADIUS_M * (FRAC_PI_4 + phi / 2.0).tan().ln(),
         )
     }
+
+    fn latlon_to_grid(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let (x, y) = self.project_xy(lat, lon);
+        ((x - self.x0) / self.dx, (y - self.y0) / self.dy)
+    }
+
+    fn grid_to_latlon(&self, grid_x: f64, grid_y: f64) -> (f64, f64) {
+        self.inverse_xy(self.x0 + grid_x * self.dx, self.y0 + grid_y * self.dy)
+    }
+
+    fn inverse_xy(&self, x: f64, y: f64) -> (f64, f64) {
+        let lambda = x / EARTH_RADIUS_M + self.lambda0;
+        let phi = 2.0 * (y / EARTH_RADIUS_M).exp().atan() - PI * 0.5;
+        (phi * RAD2DEG, normalize_lon(lambda * RAD2DEG))
+    }
 }
 
 #[derive(Clone)]
 struct PolarStereographicProjection {
     lambda0: f64,
     north: bool,
+    x0: f64,
+    y0: f64,
+    dx: f64,
+    dy: f64,
 }
 
 impl PolarStereographicProjection {
-    fn new(lad: f64, lov: f64) -> Self {
-        Self {
+    fn new(lad: f64, lov: f64, lat1: f64, lon1: f64, dx: f64, dy: f64) -> Self {
+        let mut projection = Self {
             lambda0: normalize_lon(lov) * DEG2RAD,
             north: lad >= 0.0,
-        }
+            x0: 0.0,
+            y0: 0.0,
+            dx,
+            dy,
+        };
+        let (x0, y0) = projection.project_xy(lat1, lon1);
+        projection.x0 = x0;
+        projection.y0 = y0;
+        projection
     }
 
-    fn project(&self, lat: f64, lon: f64) -> (f64, f64) {
+    fn project_xy(&self, lat: f64, lon: f64) -> (f64, f64) {
         let phi = lat * DEG2RAD;
         let lambda = normalize_lon(lon) * DEG2RAD;
         let theta = lambda - self.lambda0;
@@ -743,6 +858,85 @@ impl PolarStereographicProjection {
             2.0 * EARTH_RADIUS_M * (FRAC_PI_4 + phi / 2.0).tan()
         };
         (rho * theta.sin(), -rho * theta.cos())
+    }
+
+    fn latlon_to_grid(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let (x, y) = self.project_xy(lat, lon);
+        ((x - self.x0) / self.dx, (y - self.y0) / self.dy)
+    }
+
+    fn grid_to_latlon(&self, grid_x: f64, grid_y: f64) -> (f64, f64) {
+        self.inverse_xy(self.x0 + grid_x * self.dx, self.y0 + grid_y * self.dy)
+    }
+
+    fn inverse_xy(&self, x: f64, y: f64) -> (f64, f64) {
+        let rho = (x * x + y * y).sqrt();
+        let theta = x.atan2(-y);
+        if self.north {
+            let phi = PI * 0.5 - 2.0 * (rho / (2.0 * EARTH_RADIUS_M)).atan();
+            (
+                phi * RAD2DEG,
+                normalize_lon((self.lambda0 + theta) * RAD2DEG),
+            )
+        } else {
+            let phi = -PI * 0.5 + 2.0 * (rho / (2.0 * EARTH_RADIUS_M)).atan();
+            (
+                phi * RAD2DEG,
+                normalize_lon((self.lambda0 + theta) * RAD2DEG),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hrrr_lambert_roundtrips_first_grid_point() {
+        let projection =
+            HrrrLambertProjection::new(38.5, 38.5, 262.5, 21.138123, -122.719528, 3000.0, 3000.0);
+        let (lat, lon) = projection.grid_to_latlon(0.0, 0.0);
+        assert!((lat - 21.138123).abs() < 0.02, "lat={lat}");
+        assert!((lon - (-122.719528)).abs() < 0.02, "lon={lon}");
+
+        let (i, j) = projection.latlon_to_grid(lat, lon);
+        assert!(i.abs() < 0.02, "i={i}");
+        assert!(j.abs() < 0.02, "j={j}");
+    }
+
+    #[test]
+    fn hrrr_lambert_bounds_cover_conus_not_pacific_asia() {
+        let projection =
+            HrrrLambertProjection::new(38.5, 38.5, 262.5, 21.138123, -122.719528, 3000.0, 3000.0);
+        let corners = [
+            projection.grid_to_latlon(0.0, 0.0),
+            projection.grid_to_latlon(1798.0, 0.0),
+            projection.grid_to_latlon(0.0, 1058.0),
+            projection.grid_to_latlon(1798.0, 1058.0),
+        ];
+        let lon_min = corners
+            .iter()
+            .map(|(_, lon)| *lon)
+            .fold(f64::INFINITY, f64::min);
+        let lon_max = corners
+            .iter()
+            .map(|(_, lon)| *lon)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let lat_min = corners
+            .iter()
+            .map(|(lat, _)| *lat)
+            .fold(f64::INFINITY, f64::min);
+        let lat_max = corners
+            .iter()
+            .map(|(lat, _)| *lat)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        assert!((-136.0..=-120.0).contains(&lon_min), "lon_min={lon_min}");
+        assert!((-70.0..=-55.0).contains(&lon_max), "lon_max={lon_max}");
+        assert!((20.0..=25.0).contains(&lat_min), "lat_min={lat_min}");
+        assert!((47.0..=55.0).contains(&lat_max), "lat_max={lat_max}");
     }
 }
 
