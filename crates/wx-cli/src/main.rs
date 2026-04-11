@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use std::path::{Path, PathBuf};
 use wx_fetch::{
     DownloadClient, HrrrSelectionRequest, HrrrSubsetRequest, StagedSubset,
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
     match command {
         "status" => print_status(),
         "demo" => run_demo()?,
+        "latest-demo" => run_latest_demo(&args[1..])?,
         "plan" => run_plan(&args[1..])?,
         "download" => run_download(&args[1..])?,
         "decode" => run_decode(&args[1..])?,
@@ -83,7 +84,6 @@ fn run_demo() -> Result<()> {
         .single()
         .expect("valid fixture cycle");
     let fixture_root = repo_root().join("tests/fixtures");
-    let (x, y) = (DEMO_PROFILE_X, DEMO_PROFILE_Y);
 
     let surface_fragment = fixture_root.join("hrrr_demo_surface_fragment.grib2");
     let surface_plan = plan_hrrr_fixture_subset(
@@ -100,9 +100,78 @@ fn run_demo() -> Result<()> {
 
     let surface_messages = decode_selected_messages(&surface_fragment, &surface_plan)?;
     let pressure_messages = decode_selected_messages(&pressure_fragment, &pressure_plan)?;
-    let sounding_profile = build_hrrr_sounding_profile_with_options(
+    render_demo_products(
+        cycle,
+        &surface_plan,
+        &pressure_plan,
         &surface_messages,
         &pressure_messages,
+        repo_root().join("target/demo"),
+        "fixture".to_string(),
+    )
+}
+
+fn run_latest_demo(args: &[String]) -> Result<()> {
+    let max_hours_back = args
+        .first()
+        .map(|value| {
+            value.parse::<u16>()
+                .with_context(|| format!("invalid hours-back window {}", value))
+        })
+        .transpose()?
+        .unwrap_or(12);
+    let client = DownloadClient::with_cache_dir(None)?;
+    let (cycle, surface_candidate, pressure_candidate) =
+        find_latest_demo_cycle(&client, max_hours_back)?;
+    let output_root = repo_root().join("target/live-demo");
+    let staged_dir = output_root.join("staged");
+    std::fs::create_dir_all(&staged_dir)?;
+
+    let surface_request = surface_request(cycle);
+    let pressure_request = pressure_request(cycle);
+    let surface_staged = stage_demo_subset(
+        &client,
+        &surface_request,
+        &surface_candidate,
+        &staged_dir,
+    );
+    let pressure_staged = stage_demo_subset(
+        &client,
+        &pressure_request,
+        &pressure_candidate,
+        &staged_dir,
+    );
+
+    let surface_staged = surface_staged?;
+    let pressure_staged = pressure_staged?;
+    let surface_messages =
+        decode_selected_messages(&surface_staged.local_grib_path, &surface_staged.local_plan)?;
+    let pressure_messages =
+        decode_selected_messages(&pressure_staged.local_grib_path, &pressure_staged.local_plan)?;
+    render_demo_products(
+        cycle,
+        &surface_staged.source_plan,
+        &pressure_staged.source_plan,
+        &surface_messages,
+        &pressure_messages,
+        output_root,
+        "live".to_string(),
+    )
+}
+
+fn render_demo_products(
+    cycle: DateTime<Utc>,
+    surface_plan: &wx_fetch::SubsetPlan,
+    pressure_plan: &wx_fetch::SubsetPlan,
+    surface_messages: &[wx_grib::DecodedMessage],
+    pressure_messages: &[wx_grib::DecodedMessage],
+    output_root: PathBuf,
+    mode_label: String,
+) -> Result<()> {
+    let (x, y) = (DEMO_PROFILE_X, DEMO_PROFILE_Y);
+    let sounding_profile = build_hrrr_sounding_profile_with_options(
+        surface_messages,
+        pressure_messages,
         x,
         y,
         &SurfaceCorrectionOptions {
@@ -116,7 +185,7 @@ fn run_demo() -> Result<()> {
         .map(|message| message.field.clone())
         .context("surface fixture decode did not return the requested gust field")?;
 
-    let overlay_output_path = repo_root().join("target/demo/hrrr_gust_surface_overlay.png");
+    let overlay_output_path = output_root.join("hrrr_gust_surface_overlay.png");
     let overlay = render_field_to_png(
         &overlay_field,
         &OverlaySpec {
@@ -126,7 +195,7 @@ fn run_demo() -> Result<()> {
         },
         &overlay_output_path,
     )?;
-    let map_output_path = repo_root().join("target/demo/hrrr_gust_surface_basemap.png");
+    let map_output_path = output_root.join("hrrr_gust_surface_basemap.png");
     let map_overlay = render_field_to_map_png(
         &overlay_field,
         &MapOverlaySpec {
@@ -156,7 +225,7 @@ fn run_demo() -> Result<()> {
         },
         &map_output_path,
     )?;
-    let sounding_output_path = repo_root().join("target/demo/hrrr_model_sounding.png");
+    let sounding_output_path = output_root.join("hrrr_model_sounding.png");
     let sounding_png = render_sounding_to_png(
         &sounding_profile,
         &SoundingRenderSpec {
@@ -170,7 +239,9 @@ fn run_demo() -> Result<()> {
         .expect("decoded field should have data");
 
     println!(
-        "selection_msg={} fragment_bytes={}..{} source_range_origin={}",
+        "mode={} cycle={} selection_msg={} fragment_bytes={}..{} source_range_origin={}",
+        mode_label,
+        cycle.format("%Y%m%d%H"),
         selection.message_number,
         selection.start,
         selection.end_exclusive,
@@ -223,6 +294,53 @@ fn run_demo() -> Result<()> {
     println!("basemap_png={}", map_overlay.output_path.display());
     println!("sounding_png={}", sounding_png.output_path.display());
     Ok(())
+}
+
+fn find_latest_demo_cycle(
+    client: &DownloadClient,
+    max_hours_back: u16,
+) -> Result<(
+    DateTime<Utc>,
+    wx_fetch::HrrrSourceCandidate,
+    wx_fetch::HrrrSourceCandidate,
+)> {
+    let now = Utc::now();
+    let latest_hour = Utc
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), now.hour(), 0, 0)
+        .single()
+        .context("failed to floor current UTC hour")?;
+
+    for hours_back in 0..=max_hours_back {
+        let cycle = latest_hour - Duration::hours(i64::from(hours_back));
+        let surface = surface_request(cycle);
+        let pressure = pressure_request(cycle);
+        let surface_candidate = match probe_first_available_hrrr_source(client, &surface) {
+            Ok(candidate) => candidate,
+            Err(_) => continue,
+        };
+        let pressure_candidate = match probe_first_available_hrrr_source(client, &pressure) {
+            Ok(candidate) => candidate,
+            Err(_) => continue,
+        };
+        return Ok((cycle, surface_candidate, pressure_candidate));
+    }
+
+    bail!(
+        "failed to find an HRRR cycle with both surface and pressure products within {} hours",
+        max_hours_back
+    )
+}
+
+fn stage_demo_subset(
+    client: &DownloadClient,
+    request: &HrrrSubsetRequest,
+    candidate: &wx_fetch::HrrrSourceCandidate,
+    output_path: &Path,
+) -> Result<StagedSubset> {
+    let idx_text = fetch_remote_idx_text(client, candidate)?;
+    let plan = plan_hrrr_remote_subset(request, &idx_text, candidate)?;
+    let staged_path = output_path.join(format!("latest_{}", stage_subset_file_name(&plan)));
+    stage_remote_subset_download(client, &plan, &staged_path)
 }
 
 fn run_plan(args: &[String]) -> Result<()> {
@@ -646,6 +764,7 @@ fn print_usage() {
     println!("usage:");
     println!("  cargo run -p wx-cli -- status");
     println!("  cargo run -p wx-cli -- demo");
+    println!("  cargo run -p wx-cli -- latest-demo [max_hours_back]");
     println!(
         "  cargo run -p wx-cli -- plan [--step HOURS] <start_cycle> <end_cycle> <product> <forecast_hour> <selector...>"
     );
