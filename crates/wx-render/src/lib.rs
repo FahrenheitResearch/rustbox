@@ -12,13 +12,15 @@ use style::resolve_render_style;
 use wx_thermo::to_sharprs_profile;
 use wx_types::{Field2D, SoundingProfile};
 
-pub use map_render::render_field_to_map_png;
+pub use map_render::{render_field_to_map_png, render_field_to_map_png_with_layers};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlaySpec {
     pub palette: String,
     pub transparent_background: bool,
     pub value_range: Option<(f32, f32)>,
+    pub levels: Option<Vec<f64>>,
+    pub tick_step: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,13 +31,41 @@ pub struct MapMarker {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MapContourSpec {
+    pub field: Field2D,
+    pub levels: Vec<f64>,
+    pub color: Rgba<u8>,
+    pub width: u32,
+    pub labels: bool,
+    pub label_scale: f64,
+    pub show_extrema: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapWindBarbSpec {
+    pub u_field: Field2D,
+    pub v_field: Field2D,
+    pub stride_x: usize,
+    pub stride_y: usize,
+    pub color: Rgba<u8>,
+    pub width: u32,
+    pub length_px: f64,
+    pub speed_scale: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MapOverlaySpec {
     pub palette: String,
     pub value_range: Option<(f32, f32)>,
+    pub levels: Option<Vec<f64>>,
+    pub tick_step: Option<f64>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
+    pub subtitle_right: Option<String>,
     pub colorbar_label: Option<String>,
     pub markers: Vec<MapMarker>,
+    pub contours: Vec<MapContourSpec>,
+    pub barbs: Vec<MapWindBarbSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +109,12 @@ pub fn render_field_to_png(
         .value_range
         .or_else(|| field.finite_min_max())
         .context("field did not contain any finite values to render")?;
-    let style = resolve_render_style(&spec.palette, spec.value_range)?;
+    let style = resolve_render_style(
+        &spec.palette,
+        spec.value_range,
+        spec.levels.as_deref(),
+        spec.tick_step,
+    )?;
 
     let mut image: RgbaImage = ImageBuffer::new(field.grid.nx as u32, field.grid.ny as u32);
     for render_y in 0..field.grid.ny {
@@ -200,6 +235,8 @@ mod tests {
                 palette: "winds".to_string(),
                 transparent_background: true,
                 value_range: None,
+                levels: None,
+                tick_step: None,
             },
             &output_path,
         )
@@ -243,14 +280,19 @@ mod tests {
             &MapOverlaySpec {
                 palette: "winds".to_string(),
                 value_range: None,
+                levels: None,
+                tick_step: None,
                 title: Some("Test Gust".to_string()),
                 subtitle: Some("fixture map".to_string()),
+                subtitle_right: None,
                 colorbar_label: Some("m/s".to_string()),
                 markers: vec![MapMarker {
                     grid_x: 1_798,
                     grid_y: 1_058,
                     label: Some("profile".to_string()),
                 }],
+                contours: Vec::new(),
+                barbs: Vec::new(),
             },
             &output_path,
         )

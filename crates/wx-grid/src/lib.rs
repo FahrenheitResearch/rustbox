@@ -232,11 +232,96 @@ pub fn frontogenesis(
     out
 }
 
+pub fn wind_speed(u: &[f64], v: &[f64]) -> Vec<f64> {
+    assert_eq!(u.len(), v.len(), "u and v must have the same length");
+    u.par_iter()
+        .zip(v.par_iter())
+        .map(|(u_value, v_value)| u_value.hypot(*v_value))
+        .collect()
+}
+
+pub fn temperature_kelvin_to_celsius(temperature_k: &[f64]) -> Vec<f64> {
+    temperature_k
+        .par_iter()
+        .map(|value| value - 273.15)
+        .collect()
+}
+
+pub fn relative_humidity_from_dewpoint(temperature_c: &[f64], dewpoint_c: &[f64]) -> Vec<f64> {
+    assert_eq!(
+        temperature_c.len(),
+        dewpoint_c.len(),
+        "temperature and dewpoint must have the same length"
+    );
+    temperature_c
+        .par_iter()
+        .zip(dewpoint_c.par_iter())
+        .map(|(temperature_c, dewpoint_c)| {
+            let es = 6.112 * ((17.67 * temperature_c) / (temperature_c + 243.5)).exp();
+            let e = 6.112 * ((17.67 * dewpoint_c) / (dewpoint_c + 243.5)).exp();
+            if es.is_finite() && es > 0.0 {
+                (100.0 * e / es).clamp(0.0, 100.0)
+            } else {
+                f64::NAN
+            }
+        })
+        .collect()
+}
+
 pub fn potential_temperature(temperature_k: &[f64], pressure_hpa: f64) -> Vec<f64> {
     let theta_factor = (1000.0 / pressure_hpa).powf(KAPPA);
     temperature_k
         .par_iter()
         .map(|temperature| temperature * theta_factor)
+        .collect()
+}
+
+pub fn thickness(height_lower_m: &[f64], height_upper_m: &[f64]) -> Vec<f64> {
+    assert_eq!(
+        height_lower_m.len(),
+        height_upper_m.len(),
+        "lower and upper height fields must have the same length"
+    );
+    height_lower_m
+        .par_iter()
+        .zip(height_upper_m.par_iter())
+        .map(|(lower, upper)| upper - lower)
+        .collect()
+}
+
+pub fn lapse_rate(
+    temperature_lower_k: &[f64],
+    temperature_upper_k: &[f64],
+    height_lower_m: &[f64],
+    height_upper_m: &[f64],
+) -> Vec<f64> {
+    assert_eq!(
+        temperature_lower_k.len(),
+        temperature_upper_k.len(),
+        "lower and upper temperature fields must have the same length"
+    );
+    assert_eq!(
+        height_lower_m.len(),
+        height_upper_m.len(),
+        "lower and upper height fields must have the same length"
+    );
+    assert_eq!(
+        temperature_lower_k.len(),
+        height_lower_m.len(),
+        "temperature and height fields must have the same length"
+    );
+    temperature_lower_k
+        .par_iter()
+        .zip(temperature_upper_k.par_iter())
+        .zip(height_lower_m.par_iter().zip(height_upper_m.par_iter()))
+        .map(|((temp_lower, temp_upper), (height_lower, height_upper))| {
+            let dz_m = height_upper - height_lower;
+            if dz_m.abs() < 1.0 {
+                f64::NAN
+            } else {
+                (temp_lower - temp_upper) / (dz_m / 1_000.0)
+            }
+        })
         .collect()
 }
 
@@ -350,6 +435,24 @@ pub fn smooth_n_point(data: &[f64], nx: usize, ny: usize, n: usize, passes: usiz
     )
 }
 
+fn wind_speed_from_components(u: &[f64], v: &[f64]) -> Vec<f64> {
+    wind_speed(u, v)
+}
+
+fn wind_direction_from_components(u: &[f64], v: &[f64]) -> Vec<f64> {
+    assert_eq!(u.len(), v.len(), "u and v must have the same length");
+    u.par_iter()
+        .zip(v.par_iter())
+        .map(|(u_value, v_value)| {
+            if u_value.abs() < 1e-12 && v_value.abs() < 1e-12 {
+                0.0
+            } else {
+                (-*u_value).atan2(-*v_value).to_degrees().rem_euclid(360.0)
+            }
+        })
+        .collect()
+}
+
 pub fn gradient_x_field(field: &Field2D) -> Result<Field2D> {
     validate_scalar_field(field)?;
     let units = format!("{}/m", field.metadata.units);
@@ -420,6 +523,28 @@ pub fn divergence_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D>
     )
 }
 
+pub fn wind_speed_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
+    validate_wind_component_pair(u_field, v_field)?;
+    derived_scalar_field(
+        u_field,
+        "WSPD",
+        "Wind Speed",
+        "m/s",
+        wind_speed_from_components(&field_to_f64(u_field), &field_to_f64(v_field)),
+    )
+}
+
+pub fn wind_direction_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
+    validate_wind_component_pair(u_field, v_field)?;
+    derived_scalar_field(
+        u_field,
+        "WDIR",
+        "Wind Direction",
+        "degrees",
+        wind_direction_from_components(&field_to_f64(u_field), &field_to_f64(v_field)),
+    )
+}
+
 pub fn vorticity_field(u_field: &Field2D, v_field: &Field2D) -> Result<Field2D> {
     validate_wind_component_pair(u_field, v_field)?;
     derived_scalar_field(
@@ -463,6 +588,50 @@ pub fn advection_field(
             scalar_field.grid.coordinates.dx,
             scalar_field.grid.coordinates.dy,
         ),
+    )
+}
+
+pub fn temperature_celsius_field(temperature_field: &Field2D) -> Result<Field2D> {
+    validate_temperature_field(temperature_field)?;
+    derived_scalar_field(
+        temperature_field,
+        "TMP_C",
+        "Temperature",
+        "C",
+        temperature_kelvin_to_celsius(&field_to_f64(temperature_field)),
+    )
+}
+
+pub fn dewpoint_celsius_field(dewpoint_field: &Field2D) -> Result<Field2D> {
+    validate_dewpoint_field(dewpoint_field)?;
+    derived_scalar_field(
+        dewpoint_field,
+        "DPT_C",
+        "Dewpoint Temperature",
+        "C",
+        temperature_kelvin_to_celsius(&field_to_f64(dewpoint_field)),
+    )
+}
+
+pub fn relative_humidity_field(
+    temperature_field: &Field2D,
+    dewpoint_field: &Field2D,
+) -> Result<Field2D> {
+    validate_temperature_field(temperature_field)?;
+    validate_dewpoint_field(dewpoint_field)?;
+    ensure_compatible_fields(
+        temperature_field,
+        dewpoint_field,
+        "temperature and dewpoint",
+    )?;
+    let temperature_c = temperature_kelvin_to_celsius(&field_to_f64(temperature_field));
+    let dewpoint_c = temperature_kelvin_to_celsius(&field_to_f64(dewpoint_field));
+    derived_scalar_field(
+        temperature_field,
+        "RH",
+        "Relative Humidity",
+        "%",
+        relative_humidity_from_dewpoint(&temperature_c, &dewpoint_c),
     )
 }
 
@@ -536,6 +705,129 @@ pub fn smooth_n_point_field(field: &Field2D, n: usize, passes: usize) -> Result<
     )
 }
 
+pub fn thickness_field(
+    lower_height_field: &Field2D,
+    upper_height_field: &Field2D,
+) -> Result<Field2D> {
+    validate_height_field(lower_height_field)?;
+    validate_height_field(upper_height_field)?;
+    ensure_cross_level_compatible_fields(
+        lower_height_field,
+        upper_height_field,
+        "lower and upper height",
+    )?;
+    if lower_height_field.metadata.units != upper_height_field.metadata.units {
+        bail!(
+            "height fields use incompatible units {} and {}",
+            lower_height_field.metadata.units,
+            upper_height_field.metadata.units
+        );
+    }
+
+    let lower_pressure = isobaric_level_hpa(lower_height_field)?;
+    let upper_pressure = isobaric_level_hpa(upper_height_field)?;
+    if lower_pressure <= upper_pressure {
+        bail!(
+            "thickness requires lower level pressure > upper level pressure, got {} and {} hPa",
+            lower_pressure,
+            upper_pressure
+        );
+    }
+
+    derived_scalar_field(
+        lower_height_field,
+        "THICK",
+        "Layer thickness",
+        &lower_height_field.metadata.units,
+        thickness(
+            &field_to_f64(lower_height_field),
+            &field_to_f64(upper_height_field),
+        ),
+    )
+}
+
+pub fn lapse_rate_field(
+    lower_temperature_field: &Field2D,
+    upper_temperature_field: &Field2D,
+    lower_height_field: &Field2D,
+    upper_height_field: &Field2D,
+) -> Result<Field2D> {
+    validate_temperature_field(lower_temperature_field)?;
+    validate_temperature_field(upper_temperature_field)?;
+    validate_height_field(lower_height_field)?;
+    validate_height_field(upper_height_field)?;
+    ensure_cross_level_compatible_fields(
+        lower_temperature_field,
+        upper_temperature_field,
+        "lower and upper temperature",
+    )?;
+    ensure_cross_level_compatible_fields(
+        lower_height_field,
+        upper_height_field,
+        "lower and upper height",
+    )?;
+    ensure_cross_level_source_alignment(
+        lower_temperature_field,
+        lower_height_field,
+        "lower temperature and lower height",
+    )?;
+    ensure_cross_level_source_alignment(
+        upper_temperature_field,
+        upper_height_field,
+        "upper temperature and upper height",
+    )?;
+
+    let lower_pressure = isobaric_level_hpa(lower_temperature_field)?;
+    let upper_pressure = isobaric_level_hpa(upper_temperature_field)?;
+    if lower_pressure <= upper_pressure {
+        bail!(
+            "lapse rate requires lower level pressure > upper level pressure, got {} and {} hPa",
+            lower_pressure,
+            upper_pressure
+        );
+    }
+
+    derived_scalar_field(
+        lower_temperature_field,
+        "LRATE",
+        "Lapse Rate",
+        "K/km",
+        lapse_rate(
+            &field_to_f64(lower_temperature_field),
+            &field_to_f64(upper_temperature_field),
+            &field_to_f64(lower_height_field),
+            &field_to_f64(upper_height_field),
+        ),
+    )
+}
+
+pub fn anomaly_field(field: &Field2D) -> Result<Field2D> {
+    validate_scalar_field(field)?;
+    let stats = field_stats(field).ok_or_else(|| {
+        anyhow::anyhow!(
+            "field {} contained no finite values for anomaly calculation",
+            field.metadata.short_name
+        )
+    })?;
+    let mean = stats.mean_value;
+    derived_scalar_field(
+        field,
+        "ANOM",
+        &format!("{} anomaly", field.metadata.parameter),
+        &field.metadata.units,
+        field_to_f64(field)
+            .into_iter()
+            .map(|value| {
+                if value.is_finite() {
+                    value - mean
+                } else {
+                    f64::NAN
+                }
+            })
+            .collect(),
+    )
+}
+
 fn validate_scalar_field(field: &Field2D) -> Result<()> {
     if field.values.len() != field.expected_len() {
         bail!(
@@ -604,7 +896,48 @@ fn validate_temperature_field(field: &Field2D) -> Result<()> {
             field.metadata.units
         );
     }
-    isobaric_level_hpa(field)?;
+    Ok(())
+}
+
+fn validate_dewpoint_field(field: &Field2D) -> Result<()> {
+    validate_scalar_field(field)?;
+    let valid_parameter = matches!(
+        field.metadata.parameter.as_str(),
+        "Dew Point Temperature" | "Dewpoint Temperature"
+    );
+    if field.metadata.short_name != "DPT" || !valid_parameter {
+        bail!(
+            "field {} / {} is not a dewpoint field",
+            field.metadata.short_name,
+            field.metadata.parameter
+        );
+    }
+    if field.metadata.units != "K" {
+        bail!(
+            "dewpoint field {} uses units {}, expected K",
+            field.metadata.short_name,
+            field.metadata.units
+        );
+    }
+    Ok(())
+}
+
+fn validate_height_field(field: &Field2D) -> Result<()> {
+    validate_scalar_field(field)?;
+    if field.metadata.short_name != "HGT" || field.metadata.parameter != "Geopotential Height" {
+        bail!(
+            "field {} / {} is not a geopotential-height field",
+            field.metadata.short_name,
+            field.metadata.parameter
+        );
+    }
+    if field.metadata.units != "gpm" && field.metadata.units != "m" {
+        bail!(
+            "height field {} uses units {}, expected gpm or m",
+            field.metadata.short_name,
+            field.metadata.units
+        );
+    }
     Ok(())
 }
 
@@ -678,6 +1011,37 @@ fn ensure_compatible_fields(left: &Field2D, right: &Field2D, label: &str) -> Res
     Ok(())
 }
 
+fn ensure_cross_level_source_alignment(left: &Field2D, right: &Field2D, label: &str) -> Result<()> {
+    if left.grid != right.grid {
+        bail!("{label} use incompatible grid geometry");
+    }
+    if left.metadata.source != right.metadata.source {
+        bail!("{label} use incompatible source metadata");
+    }
+    if left.metadata.run != right.metadata.run {
+        bail!("{label} use incompatible run metadata");
+    }
+    if left.metadata.valid != right.metadata.valid {
+        bail!("{label} use incompatible valid times");
+    }
+    Ok(())
+}
+
+fn ensure_cross_level_compatible_fields(
+    left: &Field2D,
+    right: &Field2D,
+    label: &str,
+) -> Result<()> {
+    ensure_cross_level_source_alignment(left, right, label)?;
+    if left.metadata.level.code != right.metadata.level.code {
+        bail!("{label} use incompatible vertical coordinate types");
+    }
+    if left.metadata.level.units != right.metadata.level.units {
+        bail!("{label} use incompatible vertical coordinate units");
+    }
+    Ok(())
+}
+
 fn derived_scalar_field(
     template: &Field2D,
     short_name: &str,
@@ -742,28 +1106,18 @@ mod tests {
             cycle,
             forecast_hour: 0,
             product: "prs".to_string(),
-            selections: vec![
-                HrrrSelectionRequest {
-                    variable: "HGT".to_string(),
-                    level: "850 mb".to_string(),
-                    forecast: Some("anl".to_string()),
-                },
-                HrrrSelectionRequest {
-                    variable: "TMP".to_string(),
-                    level: "850 mb".to_string(),
-                    forecast: Some("anl".to_string()),
-                },
-                HrrrSelectionRequest {
-                    variable: "UGRD".to_string(),
-                    level: "850 mb".to_string(),
-                    forecast: Some("anl".to_string()),
-                },
-                HrrrSelectionRequest {
-                    variable: "VGRD".to_string(),
-                    level: "850 mb".to_string(),
-                    forecast: Some("anl".to_string()),
-                },
-            ],
+            selections: ["1000 mb", "850 mb", "500 mb"]
+                .into_iter()
+                .flat_map(|level| {
+                    ["HGT", "TMP", "DPT", "UGRD", "VGRD"]
+                        .into_iter()
+                        .map(move |variable| HrrrSelectionRequest {
+                            variable: variable.to_string(),
+                            level: level.to_string(),
+                            forecast: Some("anl".to_string()),
+                        })
+                })
+                .collect(),
         }
     }
 
@@ -795,6 +1149,22 @@ mod tests {
             .iter()
             .find(|field| field.metadata.short_name == short_name)
             .unwrap_or_else(|| panic!("missing {short_name} in decoded fixture"))
+    }
+
+    fn select_field_at_level<'a>(
+        fields: &'a [Field2D],
+        short_name: &str,
+        level_description: &str,
+    ) -> &'a Field2D {
+        fields
+            .iter()
+            .find(|field| {
+                field.metadata.short_name == short_name
+                    && field.metadata.level.description == level_description
+            })
+            .unwrap_or_else(|| {
+                panic!("missing {short_name} at {level_description} in decoded fixture")
+            })
     }
 
     #[test]
@@ -904,6 +1274,107 @@ mod tests {
     }
 
     #[test]
+    fn wind_speed_matches_pythagorean_magnitude() {
+        let speed = wind_speed(&[3.0, 0.0], &[4.0, 5.0]);
+        approx(speed[0], 5.0, 1e-10);
+        approx(speed[1], 5.0, 1e-10);
+    }
+
+    #[test]
+    fn wind_direction_uses_meteorological_from_direction() {
+        let mut u = sample_scalar_field("UGRD", "U-Component of Wind", "m/s", "850 mb");
+        let mut v = sample_scalar_field("VGRD", "V-Component of Wind", "m/s", "850 mb");
+        u.values = vec![
+            3.0, 0.0, -4.0, //
+            0.0, 0.0, 0.0, //
+            1.0, -1.0, 0.0,
+        ];
+        v.values = vec![
+            4.0, 5.0, 0.0, //
+            0.0, 0.0, -2.0, //
+            -1.0, 1.0, 0.0,
+        ];
+
+        let speed = wind_speed_field(&u, &v).expect("wind speed should succeed");
+        let direction = wind_direction_field(&u, &v).expect("wind direction should succeed");
+
+        approx(speed.values[0] as f64, 5.0, 1e-10);
+        approx(direction.values[0] as f64, 216.869_897_645_844_02, 1e-5);
+        approx(direction.values[1] as f64, 180.0, 1e-10);
+        approx(direction.values[2] as f64, 90.0, 1e-10);
+        approx(direction.values[4] as f64, 0.0, 1e-10);
+        approx(direction.values[5] as f64, 0.0, 1e-10);
+        assert_eq!(speed.metadata.short_name, "WSPD");
+        assert_eq!(direction.metadata.short_name, "WDIR");
+        assert_eq!(direction.metadata.units, "degrees");
+    }
+
+    #[test]
+    fn relative_humidity_saturates_when_temperature_equals_dewpoint() {
+        let rh = relative_humidity_from_dewpoint(&[20.0, 0.0], &[20.0, 0.0]);
+        approx(rh[0], 100.0, 1e-6);
+        approx(rh[1], 100.0, 1e-6);
+    }
+
+    #[test]
+    fn anomaly_field_removes_domain_mean() {
+        let field = sample_scalar_field("TMP", "Temperature", "K", "surface");
+        let anomaly = anomaly_field(&field).expect("anomaly field should succeed");
+        let stats = field_stats(&anomaly).expect("anomaly should remain finite");
+        approx(stats.mean_value, 0.0, 1e-6);
+    }
+
+    #[test]
+    fn thickness_field_subtracts_lower_height_from_upper_height() {
+        let lower = sample_scalar_field("HGT", "Geopotential Height", "gpm", "1000 mb");
+        let mut upper = lower.clone();
+        upper.metadata.level.description = "500 mb".to_string();
+        upper.metadata.level.value = Some(500.0);
+        upper.values.iter_mut().for_each(|value| *value += 5400.0);
+
+        let thickness = thickness_field(&lower, &upper).expect("thickness should succeed");
+        let stats = field_stats(&thickness).expect("thickness should remain finite");
+        approx(stats.min_value as f64, 5400.0, 1e-6);
+        approx(stats.max_value as f64, 5400.0, 1e-6);
+    }
+
+    #[test]
+    fn lapse_rate_field_uses_temperature_drop_per_kilometer() {
+        let lower_temperature = sample_scalar_field("TMP", "Temperature", "K", "850 mb");
+        let mut upper_temperature = lower_temperature.clone();
+        upper_temperature.metadata.level.description = "500 mb".to_string();
+        upper_temperature.metadata.level.value = Some(500.0);
+        upper_temperature
+            .values
+            .iter_mut()
+            .for_each(|value| *value -= 18.0);
+
+        let mut lower_height = sample_scalar_field("HGT", "Geopotential Height", "m", "850 mb");
+        lower_height
+            .values
+            .iter_mut()
+            .for_each(|value| *value = 1_500.0);
+        let mut upper_height = lower_height.clone();
+        upper_height.metadata.level.description = "500 mb".to_string();
+        upper_height.metadata.level.value = Some(500.0);
+        upper_height
+            .values
+            .iter_mut()
+            .for_each(|value| *value = 5_000.0);
+
+        let lapse_rate = lapse_rate_field(
+            &lower_temperature,
+            &upper_temperature,
+            &lower_height,
+            &upper_height,
+        )
+        .expect("lapse rate should succeed");
+        let stats = field_stats(&lapse_rate).expect("lapse rate should remain finite");
+        approx(stats.min_value as f64, 5.142857, 1e-5);
+        approx(stats.max_value as f64, 5.142857, 1e-5);
+    }
+
+    #[test]
     fn five_point_smoother_matches_known_center_weighting() {
         let nx = 5;
         let ny = 5;
@@ -994,34 +1465,140 @@ mod tests {
     #[test]
     fn fixture_backed_vorticity_and_theta_frontogenesis_are_finite() {
         let fields = decode_pressure_fixture_fields();
-        let _height = select_field(&fields, "HGT");
-        let temperature = select_field(&fields, "TMP");
-        let u_wind = select_field(&fields, "UGRD");
-        let v_wind = select_field(&fields, "VGRD");
+        let height_1000 = select_field_at_level(&fields, "HGT", "1000 mb");
+        let height_500 = select_field_at_level(&fields, "HGT", "500 mb");
+        let temperature_850 = select_field_at_level(&fields, "TMP", "850 mb");
+        let temperature_1000 = select_field_at_level(&fields, "TMP", "1000 mb");
+        let temperature_500 = select_field_at_level(&fields, "TMP", "500 mb");
+        let dewpoint_850 = select_field_at_level(&fields, "DPT", "850 mb");
+        let u_wind_850 = select_field_at_level(&fields, "UGRD", "850 mb");
+        let v_wind_850 = select_field_at_level(&fields, "VGRD", "850 mb");
 
-        let vorticity = vorticity_field(u_wind, v_wind).expect("vorticity should succeed");
+        let vorticity = vorticity_field(u_wind_850, v_wind_850).expect("vorticity should succeed");
         let smoothed_vorticity =
             smooth_n_point_field(&vorticity, 9, 1).expect("smoothing should succeed");
-        let theta = potential_temperature_field(temperature).expect("theta conversion should work");
-        let frontogenesis = pressure_level_frontogenesis_field(temperature, u_wind, v_wind)
-            .expect("pressure-level frontogenesis should succeed");
+        let theta =
+            potential_temperature_field(temperature_850).expect("theta conversion should work");
+        let frontogenesis =
+            pressure_level_frontogenesis_field(temperature_850, u_wind_850, v_wind_850)
+                .expect("pressure-level frontogenesis should succeed");
+        let wind_speed =
+            wind_speed_field(u_wind_850, v_wind_850).expect("wind speed should succeed");
+        let wind_direction =
+            wind_direction_field(u_wind_850, v_wind_850).expect("wind direction should succeed");
+        let relative_humidity =
+            relative_humidity_field(temperature_850, dewpoint_850).expect("rh should succeed");
+        let thickness = thickness_field(height_1000, height_500).expect("thickness should succeed");
+        let lapse_rate =
+            lapse_rate_field(temperature_1000, temperature_500, height_1000, height_500)
+                .expect("lapse rate should succeed");
 
-        assert_eq!(vorticity.grid, u_wind.grid);
-        assert_eq!(frontogenesis.grid, temperature.grid);
+        assert_eq!(vorticity.grid, u_wind_850.grid);
+        assert_eq!(frontogenesis.grid, temperature_850.grid);
 
         let vort_stats = field_stats(&vorticity).expect("vorticity should contain finite values");
         let smooth_stats =
             field_stats(&smoothed_vorticity).expect("smoothed vorticity should be finite");
         let fronto_stats =
             field_stats(&frontogenesis).expect("frontogenesis should contain finite values");
+        let wspd_stats = field_stats(&wind_speed).expect("wind speed should contain finite values");
+        let wdir_stats =
+            field_stats(&wind_direction).expect("wind direction should contain finite values");
+        let rh_stats = field_stats(&relative_humidity)
+            .expect("relative humidity should contain finite values");
+        let thk_stats = field_stats(&thickness).expect("thickness should contain finite values");
+        let lapse_stats =
+            field_stats(&lapse_rate).expect("lapse rate should contain finite values");
 
         assert!(vort_stats.max_value.is_finite());
         assert!(fronto_stats.max_value.is_finite());
         assert!(smooth_stats.max_value.abs() <= vort_stats.max_value.abs() + 1e-6);
+        assert!(wspd_stats.max_value.is_finite());
+        assert!(wdir_stats.max_value.is_finite());
+        assert!(rh_stats.max_value.is_finite());
+        assert!(thk_stats.max_value.is_finite());
+        assert!(lapse_stats.max_value.is_finite());
         assert_eq!(vorticity.metadata.short_name, "VORT");
         assert_eq!(smoothed_vorticity.metadata.short_name, "SM9");
         assert_eq!(theta.metadata.short_name, "THETA");
         assert_eq!(frontogenesis.metadata.short_name, "FGEN");
         assert_eq!(frontogenesis.metadata.parameter, "Petterssen frontogenesis");
+        assert_eq!(wind_speed.metadata.short_name, "WSPD");
+        assert_eq!(wind_direction.metadata.short_name, "WDIR");
+        assert_eq!(relative_humidity.metadata.short_name, "RH");
+        assert_eq!(thickness.metadata.short_name, "THICK");
+        assert_eq!(lapse_rate.metadata.short_name, "LRATE");
+    }
+
+    fn sample_scalar_field(
+        short_name: &str,
+        parameter: &str,
+        units: &str,
+        level_description: &str,
+    ) -> Field2D {
+        let cycle = Utc
+            .with_ymd_and_hms(2024, 4, 1, 0, 0, 0)
+            .single()
+            .expect("valid cycle");
+        Field2D {
+            metadata: FieldMetadata {
+                short_name: short_name.to_string(),
+                parameter: parameter.to_string(),
+                units: units.to_string(),
+                level: wx_types::LevelMetadata {
+                    code: if level_description == "surface" {
+                        1
+                    } else {
+                        100
+                    },
+                    description: level_description.to_string(),
+                    value: if level_description.ends_with("mb") {
+                        level_description
+                            .split_whitespace()
+                            .next()
+                            .and_then(|value| value.parse::<f64>().ok())
+                    } else {
+                        None
+                    },
+                    units: if level_description.ends_with("mb") {
+                        "hPa".to_string()
+                    } else {
+                        "surface".to_string()
+                    },
+                },
+                source: wx_types::SourceMetadata {
+                    provider: "fixture".to_string(),
+                    model: "hrrr".to_string(),
+                    product: "prs".to_string(),
+                },
+                run: wx_types::RunMetadata {
+                    cycle,
+                    forecast_hour: 0,
+                },
+                valid: wx_types::ValidTimeMetadata {
+                    reference_time: cycle,
+                    valid_time: cycle,
+                },
+            },
+            grid: wx_types::GridSpec {
+                nx: 3,
+                ny: 3,
+                projection: wx_types::ProjectionKind::LatitudeLongitude,
+                coordinates: wx_types::CoordinateMetadata {
+                    lat1: 0.0,
+                    lon1: 0.0,
+                    lat2: 0.0,
+                    lon2: 0.0,
+                    dx: 1_000.0,
+                    dy: 1_000.0,
+                },
+                scan_mode: 0,
+            },
+            values: vec![
+                1.0, 2.0, 3.0, //
+                4.0, 5.0, 6.0, //
+                7.0, 8.0, 9.0,
+            ],
+        }
     }
 }

@@ -115,7 +115,8 @@ fn run_latest_demo(args: &[String]) -> Result<()> {
     let max_hours_back = args
         .first()
         .map(|value| {
-            value.parse::<u16>()
+            value
+                .parse::<u16>()
                 .with_context(|| format!("invalid hours-back window {}", value))
         })
         .transpose()?
@@ -129,25 +130,19 @@ fn run_latest_demo(args: &[String]) -> Result<()> {
 
     let surface_request = surface_request(cycle);
     let pressure_request = pressure_request(cycle);
-    let surface_staged = stage_demo_subset(
-        &client,
-        &surface_request,
-        &surface_candidate,
-        &staged_dir,
-    );
-    let pressure_staged = stage_demo_subset(
-        &client,
-        &pressure_request,
-        &pressure_candidate,
-        &staged_dir,
-    );
+    let surface_staged =
+        stage_demo_subset(&client, &surface_request, &surface_candidate, &staged_dir);
+    let pressure_staged =
+        stage_demo_subset(&client, &pressure_request, &pressure_candidate, &staged_dir);
 
     let surface_staged = surface_staged?;
     let pressure_staged = pressure_staged?;
     let surface_messages =
         decode_selected_messages(&surface_staged.local_grib_path, &surface_staged.local_plan)?;
-    let pressure_messages =
-        decode_selected_messages(&pressure_staged.local_grib_path, &pressure_staged.local_plan)?;
+    let pressure_messages = decode_selected_messages(
+        &pressure_staged.local_grib_path,
+        &pressure_staged.local_plan,
+    )?;
     render_demo_products(
         cycle,
         &surface_staged.source_plan,
@@ -192,6 +187,8 @@ fn render_demo_products(
             palette: "winds".to_string(),
             transparent_background: true,
             value_range: None,
+            levels: None,
+            tick_step: None,
         },
         &overlay_output_path,
     )?;
@@ -201,6 +198,8 @@ fn render_demo_products(
         &MapOverlaySpec {
             palette: "winds".to_string(),
             value_range: None,
+            levels: None,
+            tick_step: None,
             title: Some("HRRR Surface Gust".to_string()),
             subtitle: Some(format!(
                 "{} | f{:02} | extracted sounding at x{} y{}",
@@ -217,11 +216,14 @@ fn render_demo_products(
                 "{} ({})",
                 overlay_field.metadata.short_name, overlay_field.metadata.units
             )),
+            subtitle_right: None,
             markers: vec![MapMarker {
                 grid_x: x,
                 grid_y: y,
                 label: Some("model column".to_string()),
             }],
+            contours: Vec::new(),
+            barbs: Vec::new(),
         },
         &map_output_path,
     )?;

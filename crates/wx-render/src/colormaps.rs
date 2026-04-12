@@ -45,6 +45,41 @@ const FRONTOGENESIS: &[&str] = &[
     "#9e2f2f", "#6f0f1f",
 ];
 
+const DEWPOINT_DRY: &[&str] = &["#996f4f", "#4d4236", "#f2f2d8"];
+const DEWPOINT_MOIST: &[(&[&str], usize)] = &[
+    (&["#e3f3e6", "#64c461"], 10),
+    (&["#32ae32", "#084d06"], 10),
+    (&["#66a3ad", "#12292a"], 10),
+    (&["#66679d", "#2b1e63"], 10),
+    (&["#714270", "#a27382"], 10),
+];
+
+const RH_SEG1: &[&str] = &["#a5734d", "#382f28", "#6e6559", "#a59b8e", "#ddd1c3"];
+const RH_SEG2: &[&str] = &["#c8d7c0", "#004a2f"];
+const RH_SEG3: &[&str] = &["#004123", "#28588c"];
+
+const SIM_IR_COOL: &[&str] = &["#7f017f", "#e36fbe"];
+const SIM_IR_WARM: &[&str] = &[
+    "#FFFFFF", "#000000", "#fd0100", "#fcff05", "#03fd03", "#010077", "#0ff6ef",
+];
+const SIM_IR_GRAY: &[&str] = &["#ffffff", "#000000"];
+
+const GEOPOT_ANOMALY: &[&str] = &[
+    "#c9f2fc", "#e684f4", "#732164", "#7b2b8d", "#8a41d6", "#253fba", "#7089cb", "#c0d5e8",
+    "#ffffff", "#fbcfa1", "#fc984b", "#b83800", "#a3241a", "#5e1425", "#42293e", "#557b75",
+    "#ddd5cf",
+];
+
+const PRECIP_SEGS: &[(&[&str], usize)] = &[
+    (&["#ffffff", "#ffffff"], 1),
+    (&["#dcdcdc", "#bebebe", "#9e9e9e", "#818181"], 9),
+    (&["#b8f0c1", "#156471"], 40),
+    (&["#164fba", "#d8edf5"], 50),
+    (&["#cfbddd", "#a134b1"], 100),
+    (&["#a43c32", "#dd9c98"], 200),
+    (&["#f6f0a3", "#7e4b26", "#542f17"], 1100),
+];
+
 pub fn reflectivity() -> Vec<Rgba<u8>> {
     REFLECTIVITY
         .iter()
@@ -60,8 +95,31 @@ pub fn temperature(count: usize) -> Vec<Rgba<u8>> {
     lerp_hex(TEMPERATURE, count)
 }
 
+pub fn dewpoint(dry: usize, moist_points_total: usize) -> Vec<Rgba<u8>> {
+    let mut colors = lerp_hex(DEWPOINT_DRY, dry);
+    let moist_per_segment = moist_points_total / DEWPOINT_MOIST.len().max(1);
+    for (anchors, _) in DEWPOINT_MOIST {
+        colors.extend(lerp_hex(anchors, moist_per_segment));
+    }
+    colors
+}
+
+pub fn rh() -> Vec<Rgba<u8>> {
+    let mut colors = lerp_hex(RH_SEG1, 40);
+    colors.extend(lerp_hex(RH_SEG2, 50));
+    colors.extend(lerp_hex(RH_SEG3, 10));
+    colors
+}
+
 pub fn relative_vorticity(count: usize) -> Vec<Rgba<u8>> {
     lerp_hex(RELVORT, count)
+}
+
+pub fn sim_ir() -> Vec<Rgba<u8>> {
+    let mut colors = lerp_hex(SIM_IR_COOL, 10);
+    colors.extend(lerp_hex(SIM_IR_WARM, 60));
+    colors.extend(lerp_hex(SIM_IR_GRAY, 60));
+    colors
 }
 
 pub fn divergence(count: usize) -> Vec<Rgba<u8>> {
@@ -74,6 +132,34 @@ pub fn advection(count: usize) -> Vec<Rgba<u8>> {
 
 pub fn frontogenesis(count: usize) -> Vec<Rgba<u8>> {
     lerp_hex(FRONTOGENESIS, count)
+}
+
+pub fn three_cape() -> Vec<Rgba<u8>> {
+    build_composite(&[10, 10, 10, 10, 10, 10, 40])
+}
+
+pub fn ehi() -> Vec<Rgba<u8>> {
+    build_composite(&[10, 10, 20, 20, 20, 40, 40])
+}
+
+pub fn lapse_rate() -> Vec<Rgba<u8>> {
+    build_composite(&[40, 10, 10, 10, 10, 0, 0])
+}
+
+pub fn uh() -> Vec<Rgba<u8>> {
+    build_composite(&[10, 10, 10, 10, 20, 20, 0])
+}
+
+pub fn geopot_anomaly(count: usize) -> Vec<Rgba<u8>> {
+    lerp_hex(GEOPOT_ANOMALY, count)
+}
+
+pub fn precip_in() -> Vec<Rgba<u8>> {
+    build_segments(PRECIP_SEGS)
+}
+
+pub fn shaded_overlay() -> Vec<Rgba<u8>> {
+    vec![Rgba([0, 0, 0, 0]), Rgba([0, 0, 0, 0x60])]
 }
 
 pub fn cape() -> Vec<Rgba<u8>> {
@@ -96,6 +182,16 @@ fn build_composite(quants: &[usize; 7]) -> Vec<Rgba<u8>> {
     for (segment, count) in segments.iter().zip(quants.iter()) {
         if *count > 0 {
             colors.extend(lerp_hex(segment, *count));
+        }
+    }
+    colors
+}
+
+fn build_segments(segs: &[(&[&str], usize)]) -> Vec<Rgba<u8>> {
+    let mut colors = Vec::new();
+    for (anchors, count) in segs {
+        if *count > 0 {
+            colors.extend(lerp_hex(anchors, *count));
         }
     }
     colors

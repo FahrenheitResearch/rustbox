@@ -1,6 +1,6 @@
 use crate::style::{RenderStyle, format_tick, resolve_render_style};
 use crate::text::{draw_text, draw_text_centered, draw_text_right, text_width};
-use crate::{MapMarker, MapOverlaySpec, RenderedOverlay};
+use crate::{MapContourSpec, MapMarker, MapOverlaySpec, MapWindBarbSpec, RenderedOverlay};
 use anyhow::{Context, Result, bail};
 use image::{ImageBuffer, Rgba, RgbaImage};
 use shapefile::{Shape, ShapeReader};
@@ -54,6 +54,16 @@ pub fn render_field_to_map_png(
     spec: &MapOverlaySpec,
     output_path: &Path,
 ) -> Result<RenderedOverlay> {
+    render_field_to_map_png_with_layers(field, spec, &spec.contours, &spec.barbs, output_path)
+}
+
+pub fn render_field_to_map_png_with_layers(
+    field: &Field2D,
+    spec: &MapOverlaySpec,
+    contours: &[MapContourSpec],
+    barbs: &[MapWindBarbSpec],
+    output_path: &Path,
+) -> Result<RenderedOverlay> {
     validate_field_shape(field)?;
 
     let (value_min, value_max) = spec
@@ -64,7 +74,12 @@ pub fn render_field_to_map_png(
         min: value_min,
         max: value_max,
     };
-    let style = resolve_render_style(&spec.palette, spec.value_range)?;
+    let style = resolve_render_style(
+        &spec.palette,
+        spec.value_range,
+        spec.levels.as_deref(),
+        spec.tick_step,
+    )?;
     let layout = PlotLayout {
         x: OUTER_PAD,
         y: OUTER_PAD + TITLE_HEIGHT,
@@ -86,6 +101,8 @@ pub fn render_field_to_map_png(
     rasterize_field(&mut image, field, &projected_grid, &style, layout);
     draw_graticule(&mut image, &projected_grid, layout);
     draw_basemap_features(&mut image, &projected_grid, layout);
+    draw_contour_overlays(&mut image, field, &projected_grid, contours, layout)?;
+    draw_wind_barb_overlays(&mut image, field, &projected_grid, barbs, layout)?;
     draw_marker_overlays(&mut image, &projected_grid, &spec.markers, layout);
     draw_rect_outline(
         &mut image,
@@ -134,6 +151,21 @@ fn validate_field_shape(field: &Field2D) -> Result<()> {
             field.values.len(),
             field.grid.nx,
             field.grid.ny
+        );
+    }
+    Ok(())
+}
+
+fn validate_compatible_overlay_field(base: &Field2D, overlay: &Field2D, label: &str) -> Result<()> {
+    if overlay.grid != base.grid {
+        bail!("{label} grid geometry does not match the base field");
+    }
+    if overlay.values.len() != overlay.expected_len() {
+        bail!(
+            "{label} value count {} does not match grid {}x{}",
+            overlay.values.len(),
+            overlay.grid.nx,
+            overlay.grid.ny
         );
     }
     Ok(())
@@ -211,6 +243,16 @@ fn draw_titles(
         SUBTITLE_TEXT,
         2,
     );
+    if let Some(subtitle_right) = &spec.subtitle_right {
+        draw_text_right(
+            image,
+            subtitle_right,
+            (layout.x + layout.width) as i32,
+            (layout.y - TITLE_HEIGHT + 30) as i32,
+            SUBTITLE_TEXT,
+            2,
+        );
+    }
     let footer = format!(
         "{} x {} | projection {}",
         field.grid.nx,
@@ -225,6 +267,258 @@ fn draw_titles(
         SUBTITLE_TEXT,
         2,
     );
+}
+
+fn draw_contour_overlays(
+    image: &mut RgbaImage,
+    base_field: &Field2D,
+    projected_grid: &ProjectedGrid,
+    contours: &[MapContourSpec],
+    layout: PlotLayout,
+) -> Result<()> {
+    for contour in contours {
+        validate_compatible_overlay_field(base_field, &contour.field, "contour overlay")?;
+        draw_single_contour_overlay(image, contour, projected_grid, layout);
+    }
+    Ok(())
+}
+
+fn draw_single_contour_overlay(
+    image: &mut RgbaImage,
+    contour: &MapContourSpec,
+    projected_grid: &ProjectedGrid,
+    layout: PlotLayout,
+) {
+    if contour.levels.is_empty() || contour.field.grid.nx < 2 || contour.field.grid.ny < 2 {
+        return;
+    }
+
+    let nx = contour.field.grid.nx;
+    let ny = contour.field.grid.ny;
+    let idx = |j: usize, i: usize| j * nx + i;
+
+    for &level in &contour.levels {
+        let mut label_drawn = !contour.labels;
+        for j in 0..(ny - 1) {
+            for i in 0..(nx - 1) {
+                let p0 = (i as f64, j as f64, contour.field.values[idx(j, i)] as f64);
+                let p1 = (
+                    (i + 1) as f64,
+                    j as f64,
+                    contour.field.values[idx(j, i + 1)] as f64,
+                );
+                let p2 = (
+                    (i + 1) as f64,
+                    (j + 1) as f64,
+                    contour.field.values[idx(j + 1, i + 1)] as f64,
+                );
+                let p3 = (
+                    i as f64,
+                    (j + 1) as f64,
+                    contour.field.values[idx(j + 1, i)] as f64,
+                );
+
+                let mut points = Vec::with_capacity(4);
+                if let Some(point) = interp_contour_point(p0, p1, level) {
+                    points.push(point);
+                }
+                if let Some(point) = interp_contour_point(p1, p2, level) {
+                    points.push(point);
+                }
+                if let Some(point) = interp_contour_point(p2, p3, level) {
+                    points.push(point);
+                }
+                if let Some(point) = interp_contour_point(p3, p0, level) {
+                    points.push(point);
+                }
+
+                if points.len() < 2 {
+                    continue;
+                }
+
+                let segments: &[(usize, usize)] = if points.len() == 4 {
+                    &[(0, 1), (2, 3)]
+                } else {
+                    &[(0, 1)]
+                };
+
+                for &(a, b) in segments {
+                    let Some(pa) = grid_point_to_canvas(projected_grid, points[a], layout) else {
+                        continue;
+                    };
+                    let Some(pb) = grid_point_to_canvas(projected_grid, points[b], layout) else {
+                        continue;
+                    };
+                    draw_line(image, pa.0, pa.1, pb.0, pb.1, contour.color, contour.width);
+
+                    if contour.labels
+                        && !label_drawn
+                        && (pb.0 - pa.0).abs() + (pb.1 - pa.1).abs() > 18.0
+                    {
+                        let label = format_tick(level * contour.label_scale);
+                        let tx = ((pa.0 + pb.0) * 0.5) as i32 - text_width(&label, 1) as i32 / 2;
+                        let ty = ((pa.1 + pb.1) * 0.5) as i32 - 4;
+                        draw_text(image, &label, tx, ty, contour.color, 1);
+                        label_drawn = true;
+                    }
+                }
+            }
+        }
+        if contour.show_extrema {
+            draw_contour_extrema(image, contour, projected_grid, layout);
+        }
+    }
+}
+
+fn interp_contour_point(a: (f64, f64, f64), b: (f64, f64, f64), level: f64) -> Option<(f64, f64)> {
+    let (x0, y0, v0) = a;
+    let (x1, y1, v1) = b;
+    if !v0.is_finite() || !v1.is_finite() {
+        return None;
+    }
+    let d0 = v0 - level;
+    let d1 = v1 - level;
+    if (d0 > 0.0 && d1 > 0.0) || (d0 < 0.0 && d1 < 0.0) {
+        return None;
+    }
+    if (v1 - v0).abs() < 1e-12 {
+        return Some(((x0 + x1) * 0.5, (y0 + y1) * 0.5));
+    }
+    let t = (level - v0) / (v1 - v0);
+    Some((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t))
+}
+
+fn draw_contour_extrema(
+    image: &mut RgbaImage,
+    contour: &MapContourSpec,
+    projected_grid: &ProjectedGrid,
+    layout: PlotLayout,
+) {
+    let nx = contour.field.grid.nx;
+    let ny = contour.field.grid.ny;
+    if nx < 21 || ny < 21 {
+        return;
+    }
+    let values = &contour.field.values;
+    let idx = |j: usize, i: usize| j * nx + i;
+    let mut extrema = Vec::new();
+    let window = (ny / 10).clamp(8, 30);
+    let edge = (ny / 15).max(6);
+
+    for j in edge..(ny - edge) {
+        for i in edge..(nx - edge) {
+            let value = values[idx(j, i)];
+            if !value.is_finite() {
+                continue;
+            }
+            let mut is_max = true;
+            let mut is_min = true;
+            let j0 = j.saturating_sub(window);
+            let j1 = (j + window).min(ny - 1);
+            let i0 = i.saturating_sub(window);
+            let i1 = (i + window).min(nx - 1);
+            'scan: for jj in j0..=j1 {
+                for ii in i0..=i1 {
+                    if jj == j && ii == i {
+                        continue;
+                    }
+                    let other = values[idx(jj, ii)];
+                    if !other.is_finite() {
+                        continue;
+                    }
+                    if other > value {
+                        is_max = false;
+                    }
+                    if other < value {
+                        is_min = false;
+                    }
+                    if !is_max && !is_min {
+                        break 'scan;
+                    }
+                }
+            }
+            if is_max {
+                extrema.push((i, j, value as f64, "H"));
+            } else if is_min {
+                extrema.push((i, j, value as f64, "L"));
+            }
+        }
+    }
+
+    let mut kept: Vec<(usize, usize, f64, &str)> = Vec::new();
+    for candidate in extrema {
+        if kept.iter().all(|(x0, y0, _, _)| {
+            let dx = *x0 as f64 - candidate.0 as f64;
+            let dy = *y0 as f64 - candidate.1 as f64;
+            (dx * dx + dy * dy).sqrt() >= 24.0
+        }) {
+            kept.push(candidate);
+        }
+    }
+
+    for (x, y, value, label) in kept.into_iter().take(8) {
+        let Some((px, py)) = grid_point_to_canvas(projected_grid, (x as f64, y as f64), layout)
+        else {
+            continue;
+        };
+        draw_text_centered(
+            image,
+            label,
+            px.round() as i32,
+            py.round() as i32 - 10,
+            contour.color,
+            2,
+        );
+        let value_label = format!("{:.0}", value);
+        draw_text_centered(
+            image,
+            &value_label,
+            px.round() as i32,
+            py.round() as i32 + 8,
+            contour.color,
+            1,
+        );
+    }
+}
+
+fn draw_wind_barb_overlays(
+    image: &mut RgbaImage,
+    base_field: &Field2D,
+    projected_grid: &ProjectedGrid,
+    barbs: &[MapWindBarbSpec],
+    layout: PlotLayout,
+) -> Result<()> {
+    for barb in barbs {
+        validate_compatible_overlay_field(base_field, &barb.u_field, "barb u-component")?;
+        validate_compatible_overlay_field(base_field, &barb.v_field, "barb v-component")?;
+        draw_single_wind_barb_overlay(image, barb, projected_grid, layout);
+    }
+    Ok(())
+}
+
+fn draw_single_wind_barb_overlay(
+    image: &mut RgbaImage,
+    barb: &MapWindBarbSpec,
+    projected_grid: &ProjectedGrid,
+    layout: PlotLayout,
+) {
+    let nx = barb.u_field.grid.nx;
+    let ny = barb.u_field.grid.ny;
+    let stride_x = barb.stride_x.max(1);
+    let stride_y = barb.stride_y.max(1);
+
+    for j in (0..ny).step_by(stride_y) {
+        for i in (0..nx).step_by(stride_x) {
+            let index = j * nx + i;
+            let u = barb.u_field.values[index] as f64 * barb.speed_scale;
+            let v = barb.v_field.values[index] as f64 * barb.speed_scale;
+            let Some((px, py)) = grid_point_to_canvas(projected_grid, (i as f64, j as f64), layout)
+            else {
+                continue;
+            };
+            draw_wind_barb(image, px, py, u, v, barb.color, barb.length_px, barb.width);
+        }
+    }
 }
 
 fn draw_colorbar(
@@ -300,14 +594,12 @@ fn draw_marker_overlays(
     layout: PlotLayout,
 ) {
     for marker in markers {
-        let Some((px, py)) =
-            projected_grid.extent.pixel_coords(
-                marker.grid_x as f64,
-                marker.grid_y as f64,
-                layout.width,
-                layout.height,
-            )
-        else {
+        let Some((px, py)) = projected_grid.extent.pixel_coords(
+            marker.grid_x as f64,
+            marker.grid_y as f64,
+            layout.width,
+            layout.height,
+        ) else {
             continue;
         };
         let px = layout.x as f64 + px;
@@ -352,7 +644,11 @@ fn draw_graticule(image: &mut RgbaImage, projected_grid: &ProjectedGrid, layout:
     }
 }
 
-fn draw_basemap_features(image: &mut RgbaImage, projected_grid: &ProjectedGrid, layout: PlotLayout) {
+fn draw_basemap_features(
+    image: &mut RgbaImage,
+    projected_grid: &ProjectedGrid,
+    layout: PlotLayout,
+) {
     for layer in load_basemap_layers() {
         for line in &layer.lines {
             let mut projected = Vec::new();
@@ -374,10 +670,18 @@ fn project_to_pixel(
 ) -> Option<(f64, f64)> {
     let (grid_x, native_grid_y) = projected_grid.projector.latlon_to_grid(lat, lon)?;
     let grid_y = projected_grid.native_y_to_display_y(native_grid_y);
+    grid_point_to_canvas(projected_grid, (grid_x, grid_y), layout)
+}
+
+fn grid_point_to_canvas(
+    projected_grid: &ProjectedGrid,
+    point: (f64, f64),
+    layout: PlotLayout,
+) -> Option<(f64, f64)> {
     let (px, py) =
         projected_grid
             .extent
-            .pixel_coords(grid_x, grid_y, layout.width, layout.height)?;
+            .pixel_coords(point.0, point.1, layout.width, layout.height)?;
     Some((layout.x as f64 + px, layout.y as f64 + py))
 }
 
@@ -503,13 +807,7 @@ struct MapExtent {
 }
 
 impl MapExtent {
-    fn from_bounds(
-        x_min: f64,
-        x_max: f64,
-        y_min: f64,
-        y_max: f64,
-        target_ratio: f64,
-    ) -> Self {
+    fn from_bounds(x_min: f64, x_max: f64, y_min: f64, y_max: f64, target_ratio: f64) -> Self {
         let data_width = x_max - x_min;
         let data_height = y_max - y_min;
         let data_ratio = data_width / data_height.max(1.0);
@@ -559,11 +857,15 @@ struct ProjectedGrid {
 
 impl ProjectedGrid {
     fn lat_bounds(&self) -> (f64, f64) {
-        self.sample_geo_bounds().map(|(lat_min, lat_max, _, _)| (lat_min, lat_max)).unwrap_or((20.0, 55.0))
+        self.sample_geo_bounds()
+            .map(|(lat_min, lat_max, _, _)| (lat_min, lat_max))
+            .unwrap_or((20.0, 55.0))
     }
 
     fn lon_bounds(&self) -> (f64, f64) {
-        self.sample_geo_bounds().map(|(_, _, lon_min, lon_max)| (lon_min, lon_max)).unwrap_or((-130.0, -60.0))
+        self.sample_geo_bounds()
+            .map(|(_, _, lon_min, lon_max)| (lon_min, lon_max))
+            .unwrap_or((-130.0, -60.0))
     }
 
     fn sample_geo_bounds(&self) -> Option<(f64, f64, f64, f64)> {
@@ -987,8 +1289,12 @@ mod tests {
     fn pixel_coords_map_south_to_bottom_and_north_to_top() {
         let extent = MapExtent::from_bounds(0.0, 10.0, 0.0, 10.0, 1.0);
 
-        let (_, south_y) = extent.pixel_coords(0.0, 0.0, 100, 100).expect("south point");
-        let (_, north_y) = extent.pixel_coords(0.0, 10.0, 100, 100).expect("north point");
+        let (_, south_y) = extent
+            .pixel_coords(0.0, 0.0, 100, 100)
+            .expect("south point");
+        let (_, north_y) = extent
+            .pixel_coords(0.0, 10.0, 100, 100)
+            .expect("north point");
 
         assert!(south_y < north_y, "south_y={south_y} north_y={north_y}");
         assert!(south_y.abs() < 0.1, "south_y={south_y}");
@@ -1016,7 +1322,10 @@ mod tests {
             .grid_to_latlon(0.0, projected.display_y_to_native_y(1058.0))
             .expect("south row");
 
-        assert!(north_lat > south_lat, "north_lat={north_lat} south_lat={south_lat}");
+        assert!(
+            north_lat > south_lat,
+            "north_lat={north_lat} south_lat={south_lat}"
+        );
     }
 }
 
@@ -1128,6 +1437,158 @@ fn draw_line(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_wind_barb(
+    image: &mut RgbaImage,
+    x_tip: f64,
+    y_tip: f64,
+    u: f64,
+    v: f64,
+    color: Rgba<u8>,
+    shaft_len: f64,
+    width: u32,
+) {
+    if !u.is_finite() || !v.is_finite() {
+        return;
+    }
+
+    let speed = (u * u + v * v).sqrt();
+    if speed < 2.5 {
+        blend_pixel(image, x_tip.round() as i32, y_tip.round() as i32, color);
+        return;
+    }
+
+    let tail_dx = -u / speed;
+    let tail_dy = v / speed;
+    let perp_dx = -tail_dy;
+    let perp_dy = tail_dx;
+
+    let tail_x = x_tip + tail_dx * shaft_len;
+    let tail_y = y_tip + tail_dy * shaft_len;
+    draw_line(image, tail_x, tail_y, x_tip, y_tip, color, width);
+
+    let mut remaining = ((speed + 2.5) / 5.0).floor() as i32 * 5;
+    let mut offset = shaft_len;
+    let spacing = (shaft_len * 0.16).max(2.0);
+    let full_height = shaft_len * 0.40;
+    let full_width = shaft_len * 0.25;
+
+    while remaining >= 50 {
+        draw_barb_flag(
+            image,
+            (x_tip, y_tip),
+            (tail_dx, tail_dy),
+            (perp_dx, perp_dy),
+            offset,
+            full_height,
+            full_width,
+            color,
+            width,
+        );
+        remaining -= 50;
+        offset -= full_width + spacing;
+    }
+
+    while remaining >= 10 {
+        draw_barb_segment(
+            image,
+            (x_tip, y_tip),
+            (tail_dx, tail_dy),
+            (perp_dx, perp_dy),
+            offset,
+            full_height,
+            full_width * 0.5,
+            color,
+            width,
+        );
+        remaining -= 10;
+        offset -= spacing;
+    }
+
+    if remaining >= 5 {
+        if (offset - shaft_len).abs() < 1e-6 {
+            offset -= 1.5 * spacing;
+        }
+        draw_barb_segment(
+            image,
+            (x_tip, y_tip),
+            (tail_dx, tail_dy),
+            (perp_dx, perp_dy),
+            offset,
+            full_height * 0.5,
+            full_width * 0.25,
+            color,
+            width,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_barb_segment(
+    image: &mut RgbaImage,
+    tip: (f64, f64),
+    tail_dir: (f64, f64),
+    perp_dir: (f64, f64),
+    offset: f64,
+    height: f64,
+    along_tail: f64,
+    color: Rgba<u8>,
+    width: u32,
+) {
+    let base_x = tip.0 + tail_dir.0 * offset;
+    let base_y = tip.1 + tail_dir.1 * offset;
+    let feather_x = base_x + perp_dir.0 * height + tail_dir.0 * along_tail;
+    let feather_y = base_y + perp_dir.1 * height + tail_dir.1 * along_tail;
+    draw_line(image, base_x, base_y, feather_x, feather_y, color, width);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_barb_flag(
+    image: &mut RgbaImage,
+    tip: (f64, f64),
+    tail_dir: (f64, f64),
+    perp_dir: (f64, f64),
+    offset: f64,
+    height: f64,
+    along_tail: f64,
+    color: Rgba<u8>,
+    width: u32,
+) {
+    let base_x = tip.0 + tail_dir.0 * offset;
+    let base_y = tip.1 + tail_dir.1 * offset;
+    let flag_tip_x = base_x + perp_dir.0 * height - tail_dir.0 * (along_tail * 0.5);
+    let flag_tip_y = base_y + perp_dir.1 * height - tail_dir.1 * (along_tail * 0.5);
+    let flag_tail_x = base_x - tail_dir.0 * along_tail;
+    let flag_tail_y = base_y - tail_dir.1 * along_tail;
+    draw_line(
+        image,
+        base_x,
+        base_y,
+        flag_tip_x,
+        flag_tip_y,
+        color,
+        width + 1,
+    );
+    draw_line(
+        image,
+        flag_tip_x,
+        flag_tip_y,
+        flag_tail_x,
+        flag_tail_y,
+        color,
+        width + 1,
+    );
+    draw_line(
+        image,
+        flag_tail_x,
+        flag_tail_y,
+        base_x,
+        base_y,
+        color,
+        width + 1,
+    );
 }
 
 fn blend_pixel(image: &mut RgbaImage, x: i32, y: i32, color: Rgba<u8>) {
